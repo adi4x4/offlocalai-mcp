@@ -1,0 +1,53 @@
+# offlocal.ai config — copy to `.offlocal/config.yaml`, replace the placeholder
+# values with your REAL projects/resources, then run `offlocal init`.
+#
+# This file IS the mental model: projects → environments → which provider
+# account/resource each environment uses → what policy permits. Secrets are
+# NEVER stored here; tokens are read from environment variables at call time
+# (GITHUB_TOKEN, VERCEL_TOKEN, VERCEL_TEAM_ID?, SUPABASE_ACCESS_TOKEN,
+# STRIPE_TEST_SECRET_KEY, STRIPE_LIVE_SECRET_KEY).
+
+projects:
+  # The key is your project's id-safe slug. Add one block per project.
+  your-project:
+    name: Your Project
+    description: One line describing this project.
+    environments:
+      staging:
+        github:
+          repo: your-org/your-repo
+        vercel:
+          project: your-staging-vercel-project   # id or name
+        supabase:
+          project_ref: your_staging_project_ref
+        stripe:
+          mode: test
+      production:
+        github:
+          repo: your-org/your-repo
+        vercel:
+          project: your-production-vercel-project
+        supabase:
+          project_ref: your_production_project_ref
+        stripe:
+          mode: live
+    # Optional notes future agent sessions should know. Surfaced in get_project_context.
+    memory:
+      - environment: production
+        note: "Production DB writes are blocked by default."
+        tags: [safety]
+
+# Policy declared as capability tokens. `require_approval` entries apply to
+# PRODUCTION (staging/dev keep permissive defaults so they stay usable). `block`
+# entries apply everywhere. These mirror the built-in safe defaults; edit to suit.
+#   tokens: <provider>.<capability>  |  provider.<capability> (wildcard provider)
+#   capabilities: read | write | deploy | env.write | destructive_sql | delete
+policy:
+  require_approval:
+    - vercel.deploy
+    - vercel.env.write
+    - supabase.write
+    - stripe.write
+  block:
+    - supabase.destructive_sql
+    - provider.delete

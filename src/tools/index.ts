@@ -1,0 +1,471 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import type { Store } from "../storage.js";
+import * as svc from "../service.js";
+import * as pa from "../provider-actions.js";
+import { PROVIDER_IDS } from "../types.js";
+
+/**
+ * Registers every offlocal.ai tool on the MCP server. Handlers are thin: they
+ * validate args (via Zod), call the service / provider-action layer, and return
+ * the result as a JSON text block. Failures are returned with isError:true and
+ * an actionable message (never a raw throw across the wire).
+ */
+
+type ToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError?: boolean;
+};
+
+function ok(data: unknown): ToolResult {
+  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+}
+
+function fail(message: string): ToolResult {
+  return {
+    content: [{ type: "text", text: JSON.stringify({ status: "error", error: message }, null, 2) }],
+    isError: true,
+  };
+}
+
+/** Wrap a handler so thrown errors become clean isError responses. */
+function guard<A>(fn: (args: A) => unknown | Promise<unknown>) {
+  return async (args: A): Promise<ToolResult> => {
+    try {
+      const result = await fn(args);
+      // Provider actions already return a {status} envelope; pass through.
+      return ok(result);
+    } catch (err) {
+      return fail(err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+const provider = z.enum(["github", "vercel", "supabase", "stripe"]);
+const capability = z.enum(["read", "write", "deploy", "env_change", "delete", "destructive_sql"]);
+
+export function registerTools(server: McpServer, store: Store): void {
+  // --- Project / workspace -------------------------------------------------
+
+  server.registerTool(
+    "list_projects",
+    {
+      title: "List projects",
+      description: "List all known projects and which one is currently selected.",
+      inputSchema: {},
+    },
+    guard(() => ({ status: "ok", projects: svc.listProjects(store) })),
+  );
+
+  server.registerTool(
+    "create_project",
+    {
+      title: "Create project",
+      description: "Create a new project in the default workspace.",
+      inputSchema: {
+        name: z.string().describe("Display name, e.g. 'Your Project'"),
+        slug: z.string().optional().describe("Optional id-safe slug; derived from name if omitted"),
+        description: z.string().optional(),
+      },
+    },
+    guard((a: { name: string; slug?: string; description?: string }) => ({
+      status: "ok",
+      project: svc.createProject(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "select_project",
+    {
+      title: "Select project",
+      description: "Set the active project used by tools that omit an explicit project arg.",
+      inputSchema: { project: z.string().describe("Project id or slug") },
+    },
+    guard((a: { project: string }) => ({ status: "ok", project: svc.selectProject(store, a.project) })),
+  );
+
+  server.registerTool(
+    "get_project_context",
+    {
+      title: "Get project context",
+      description:
+        "THE tool to call FIRST. Returns the full production context for a project/environment: " +
+        "GitHub repo, Vercel project + live latest deployment status/URL/failure, Supabase project, " +
+        "Stripe mode, what is allowed / blocked / approval-required, project memory, recent audit " +
+        "history, suggested safe next actions, and a human-readable summary. Pass `environment` to " +
+        "focus on one (recommended); otherwise all environments are returned.",
+      inputSchema: {
+        project: z.string().optional().describe("Project id or slug; uses selected if omitted"),
+        environment: z.string().optional().describe("Environment id or name to focus on (e.g. 'staging')"),
+      },
+    },
+    guard(async (a: { project?: string; environment?: string }) => ({
+      status: "ok",
+      context: await svc.getProjectContext(store, a.project, a.environment),
+    })),
+  );
+
+  server.registerTool(
+    "add_environment",
+    {
+      title: "Add environment",
+      description: "Add an environment (e.g. staging, production) to a project.",
+      inputSchema: {
+        project: z.string().optional(),
+        name: z.string().describe("e.g. 'staging' or 'production'"),
+        kind: z.enum(["development", "staging", "production"]).optional().describe("Inferred from name if omitted"),
+      },
+    },
+    guard((a: { project?: string; name: string; kind?: "development" | "staging" | "production" }) => ({
+      status: "ok",
+      environment: svc.addEnvironment(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "list_environments",
+    {
+      title: "List environments",
+      description: "List environments for a project.",
+      inputSchema: { project: z.string().optional() },
+    },
+    guard((a: { project?: string }) => ({ status: "ok", environments: svc.listEnvironments(store, a.project) })),
+  );
+
+  // --- Provider mappings ---------------------------------------------------
+
+  server.registerTool(
+    "map_provider_resource",
+    {
+      title: "Map provider resource",
+      description:
+        "Bind a provider resource to a project environment. Examples of `resource`: " +
+        "{provider:'github',owner:'your-org',repo:'your-repo'}, {provider:'vercel',projectId:'your-vercel-project'}, " +
+        "{provider:'supabase',projectRef:'your_project_ref'}, {provider:'stripe',mode:'live'}.",
+      inputSchema: {
+        project: z.string().optional(),
+        environment: z.string().describe("Environment id or name"),
+        provider,
+        resource: z
+          .record(z.any())
+          .describe("Resource object including a 'provider' field matching `provider`"),
+      },
+    },
+    guard((a: { project?: string; environment: string; provider: (typeof PROVIDER_IDS)[number]; resource: any }) => {
+      const res = svc.mapProviderResource(store, {
+        project: a.project,
+        environment: a.environment,
+        provider: a.provider,
+        resource: { provider: a.provider, ...a.resource },
+      });
+      return { status: "ok", project: res.project.slug, environment: res.environment.name, mappingId: res.mappingId };
+    }),
+  );
+
+  server.registerTool(
+    "list_provider_mappings",
+    {
+      title: "List provider mappings",
+      description: "List all environment→provider-resource mappings for a project.",
+      inputSchema: { project: z.string().optional() },
+    },
+    guard((a: { project?: string }) => ({ status: "ok", mappings: svc.listProviderMappings(store, a.project) })),
+  );
+
+  server.registerTool(
+    "get_provider_mapping",
+    {
+      title: "Get provider mapping",
+      description: "Get the concrete provider resource mapped to a given environment.",
+      inputSchema: { project: z.string().optional(), environment: z.string(), provider },
+    },
+    guard((a: { project?: string; environment: string; provider: (typeof PROVIDER_IDS)[number] }) => ({
+      status: "ok",
+      mapping: svc.getProviderMapping(store, a),
+    })),
+  );
+
+  // --- Policy --------------------------------------------------------------
+
+  server.registerTool(
+    "check_policy",
+    {
+      title: "Check policy",
+      description:
+        "Ask whether a capability (read/write/deploy/env_change/delete/destructive_sql) is " +
+        "allowed, blocked, or requires approval for a provider in an environment — WITHOUT " +
+        "executing anything.",
+      inputSchema: {
+        project: z.string().optional(),
+        environment: z.string(),
+        provider,
+        capability,
+        live: z.boolean().optional().describe("Treat as a live/irreversible action (e.g. Stripe live)"),
+      },
+    },
+    guard((a: any) => ({ status: "ok", decision: svc.checkPolicy(store, a) })),
+  );
+
+  server.registerTool(
+    "list_policy_rules",
+    {
+      title: "List policy rules",
+      description: "List explicit policy rules (highest priority first). Built-in defaults also apply.",
+      inputSchema: {},
+    },
+    guard(() => ({ status: "ok", rules: svc.listPolicyRules(store) })),
+  );
+
+  server.registerTool(
+    "set_policy_rule",
+    {
+      title: "Set policy rule",
+      description:
+        "Add an explicit policy rule that overrides defaults. Higher priority wins. Use this to " +
+        "approve something normally gated (effect:'allow') or to tighten further (effect:'block').",
+      inputSchema: {
+        effect: z.enum(["allow", "block", "approval_required"]),
+        description: z.string().optional(),
+        priority: z.number().optional().describe("Default 100; higher wins"),
+        match: z
+          .object({
+            projectId: z.string().optional(),
+            environmentId: z.string().optional(),
+            environmentKind: z.enum(["development", "staging", "production"]).optional(),
+            provider: provider.optional(),
+            capability: capability.optional(),
+          })
+          .describe("Unset fields are wildcards"),
+      },
+    },
+    guard((a: any) => ({ status: "ok", rule: svc.setPolicyRule(store, a) })),
+  );
+
+  // --- Memory / audit ------------------------------------------------------
+
+  server.registerTool(
+    "read_project_memory",
+    {
+      title: "Read project memory",
+      description: "Read short notes saved for a project (optionally scoped to one environment).",
+      inputSchema: { project: z.string().optional(), environment: z.string().optional() },
+    },
+    guard((a: { project?: string; environment?: string }) => ({
+      status: "ok",
+      memory: svc.readProjectMemory(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "write_project_memory",
+    {
+      title: "Write project memory",
+      description:
+        "Save a short note for a project/environment so future agent sessions know what happened " +
+        "(e.g. 'Last Vercel deploy failed because DATABASE_URL was missing').",
+      inputSchema: {
+        project: z.string().optional(),
+        environment: z.string().optional(),
+        note: z.string(),
+        tags: z.array(z.string()).optional(),
+      },
+    },
+    guard((a: { project?: string; environment?: string; note: string; tags?: string[] }) => ({
+      status: "ok",
+      entry: svc.writeProjectMemory(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "list_audit_log",
+    {
+      title: "List audit log",
+      description: "List recent audit entries (every provider action is logged here). Filter by project, environment, provider.",
+      inputSchema: {
+        project: z.string().optional(),
+        environment: z.string().optional(),
+        provider: provider.optional(),
+        limit: z.number().optional(),
+      },
+    },
+    guard((a: { project?: string; environment?: string; provider?: (typeof PROVIDER_IDS)[number]; limit?: number }) => ({
+      status: "ok",
+      entries: svc.listAuditLog(store, a),
+    })),
+  );
+
+  registerProviderTools(server, store);
+}
+
+function registerProviderTools(server: McpServer, store: Store): void {
+  const env = z.string().describe("Environment id or name");
+  const proj = z.string().optional().describe("Project id or slug; uses selected if omitted");
+
+  // GitHub
+  server.registerTool(
+    "get_github_repo_context",
+    {
+      title: "GitHub repo context",
+      description: "Read metadata (default branch, language, visibility, last push) for the mapped repo.",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.githubRepoContext(store, a)),
+  );
+  server.registerTool(
+    "get_github_repo_readme",
+    {
+      title: "GitHub README",
+      description: "Fetch the README of the mapped repo.",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.githubReadme(store, a)),
+  );
+  server.registerTool(
+    "list_github_repo_files",
+    {
+      title: "List GitHub repo files",
+      description: "List files/directories at a path in the mapped repo (default: root).",
+      inputSchema: { project: proj, environment: env, path: z.string().optional() },
+    },
+    guard((a: any) => pa.githubListFiles(store, a)),
+  );
+
+  // Vercel
+  server.registerTool(
+    "get_vercel_project_context",
+    {
+      title: "Vercel project context",
+      description: "Read the mapped Vercel project (framework, id).",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.vercelProjectContext(store, a)),
+  );
+  server.registerTool(
+    "get_vercel_deployments",
+    {
+      title: "Vercel deployments",
+      description: "List recent deployments for the mapped Vercel project.",
+      inputSchema: { project: proj, environment: env, limit: z.number().optional() },
+    },
+    guard((a: any) => pa.vercelDeployments(store, a)),
+  );
+  server.registerTool(
+    "get_vercel_deployment_status",
+    {
+      title: "Vercel deployment status",
+      description: "Get the readyState/status of a specific deployment.",
+      inputSchema: { project: proj, environment: env, deploymentId: z.string() },
+    },
+    guard((a: any) => pa.vercelDeploymentStatus(store, a)),
+  );
+  server.registerTool(
+    "get_vercel_deployment_logs",
+    {
+      title: "Vercel deployment logs",
+      description: "Fetch build/runtime events (logs) for a specific deployment.",
+      inputSchema: { project: proj, environment: env, deploymentId: z.string(), limit: z.number().optional() },
+    },
+    guard((a: any) => pa.vercelDeploymentLogs(store, a)),
+  );
+  server.registerTool(
+    "set_vercel_env_var",
+    {
+      title: "Set Vercel env var",
+      description:
+        "Set/upsert an environment variable on the mapped Vercel project. PRODUCTION changes " +
+        "require approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        key: z.string(),
+        value: z.string(),
+        target: z.array(z.string()).optional().describe("e.g. ['production'] or ['preview']"),
+      },
+    },
+    guard((a: any) => pa.vercelSetEnvVar(store, a)),
+  );
+  server.registerTool(
+    "create_vercel_deployment",
+    {
+      title: "Create Vercel deployment",
+      description: "Trigger a deployment of the mapped Vercel project. PRODUCTION deploys require approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        name: z.string().optional(),
+        deploymentId: z.string().optional().describe("Redeploy from an existing deployment id"),
+      },
+    },
+    guard((a: any) => pa.vercelCreateDeployment(store, a)),
+  );
+
+  // Supabase
+  server.registerTool(
+    "list_supabase_projects",
+    {
+      title: "List Supabase projects",
+      description: "List all Supabase projects visible to the access token (account-level, read-only).",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.supabaseListProjects(store, a)),
+  );
+  server.registerTool(
+    "get_supabase_project_context",
+    {
+      title: "Supabase project context",
+      description: "Get details of the mapped Supabase project (status, region).",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.supabaseProjectContext(store, a)),
+  );
+  server.registerTool(
+    "query_supabase",
+    {
+      title: "Query Supabase",
+      description:
+        "Run SQL against the mapped Supabase project. Reads run with read_only=true. Destructive SQL " +
+        "(DROP/TRUNCATE/DELETE/ALTER…) is blocked everywhere by default; non-read writes in production " +
+        "require approval.",
+      inputSchema: { project: proj, environment: env, sql: z.string() },
+    },
+    guard((a: any) => pa.supabaseQuery(store, a)),
+  );
+
+  // Stripe
+  server.registerTool(
+    "list_stripe_products",
+    {
+      title: "List Stripe products",
+      description: "List products in the environment's Stripe mode (test/live).",
+      inputSchema: { project: proj, environment: env, limit: z.number().optional() },
+    },
+    guard((a: any) => pa.stripeListProducts(store, a)),
+  );
+  server.registerTool(
+    "create_stripe_product",
+    {
+      title: "Create Stripe product",
+      description:
+        "Create a product. Test-mode writes are allowed by default; LIVE-mode writes require approval.",
+      inputSchema: { project: proj, environment: env, name: z.string(), description: z.string().optional() },
+    },
+    guard((a: any) => pa.stripeCreateProduct(store, a)),
+  );
+  server.registerTool(
+    "create_stripe_price",
+    {
+      title: "Create Stripe price",
+      description:
+        "Create a price for a product. Test-mode writes allowed by default; LIVE-mode writes require approval.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        product: z.string().describe("Stripe product id"),
+        currency: z.string().describe("ISO currency, e.g. 'usd'"),
+        unitAmount: z.number().describe("Amount in the smallest currency unit, e.g. cents"),
+        recurringInterval: z.enum(["day", "week", "month", "year"]).optional(),
+      },
+    },
+    guard((a: any) => pa.stripeCreatePrice(store, a)),
+  );
+}
