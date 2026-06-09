@@ -1,12 +1,24 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { dashclawConfigFromEnv, dashclawFetch } from "../src/dashclaw/client.js";
-import { normalizeDashclawDecision } from "../src/dashclaw/guard.js";
+import {
+  buildDashclawGuardPayload,
+  guardWithDashclaw,
+  isRiskyAction,
+  localPolicyPreview,
+  normalizeDashclawDecision,
+  sqlFingerprint,
+} from "../src/dashclaw/guard.js";
+import type { Store } from "../src/storage.js";
+import type { ActionContext, PolicyDecision } from "../src/types.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
   delete process.env.DASHCLAW_BASE_URL;
   delete process.env.DASHCLAW_API_KEY;
   delete process.env.DASHCLAW_TIMEOUT_MS;
+  delete process.env.OFFLOCAL_DASHCLAW_MODE;
+  delete process.env.OFFLOCAL_HTTP_TIMEOUT_MS;
 });
 
 describe("DashClaw client", () => {
@@ -67,5 +79,142 @@ describe("DashClaw decision normalization", () => {
 
   it("rejects unknown decisions loudly", () => {
     expect(() => normalizeDashclawDecision("unsupported_decision")).toThrow(/unknown DashClaw decision/i);
+  });
+});
+
+function actionContext(overrides: Partial<ActionContext> = {}): ActionContext {
+  return {
+    project: {
+      id: "proj_1",
+      workspaceId: "ws_1",
+      slug: "acme-crm",
+      name: "Acme CRM",
+      createdAt: "2026-06-09T00:00:00.000Z",
+    },
+    environment: {
+      id: "env_1",
+      projectId: "proj_1",
+      name: "production",
+      kind: "production",
+      isProduction: true,
+      createdAt: "2026-06-09T00:00:00.000Z",
+    },
+    provider: "vercel",
+    capability: "deploy",
+    tool: "create_vercel_deployment",
+    summary: "deploy acme-crm-prod",
+    resourceLabel: "acme-crm-prod",
+    ...overrides,
+  };
+}
+
+const localPreview: PolicyDecision = {
+  effect: "approval_required",
+  reason: "Production deploys require approval by default.",
+  source: "default",
+};
+
+describe("DashClaw guard payload mapping", () => {
+  it("marks risky capabilities", () => {
+    expect(isRiskyAction(actionContext({ capability: "read" }))).toBe(false);
+    expect(isRiskyAction(actionContext({ capability: "write" }))).toBe(true);
+    expect(isRiskyAction(actionContext({ capability: "deploy" }))).toBe(true);
+    expect(isRiskyAction(actionContext({ capability: "env_change" }))).toBe(true);
+    expect(isRiskyAction(actionContext({ capability: "delete" }))).toBe(true);
+    expect(isRiskyAction(actionContext({ capability: "destructive_sql" }))).toBe(true);
+    expect(isRiskyAction(actionContext({ capability: "read", live: true }))).toBe(true);
+  });
+
+  it("builds provider deploy guard payload", () => {
+    const payload = buildDashclawGuardPayload(actionContext(), localPreview, "audit_123");
+
+    expect(payload).toMatchObject({
+      action_type: "provider_deploy",
+      declared_goal: "deploy acme-crm-prod",
+      reversible: false,
+      risk_score: 85,
+      systems_touched: ["vercel:acme-crm-prod", "project:acme-crm", "environment:production"],
+      metadata: {
+        provider: "vercel",
+        capability: "deploy",
+        tool: "create_vercel_deployment",
+        local_policy_effect: "approval_required",
+        audit_correlation_id: "audit_123",
+      },
+    });
+  });
+
+  it("does not include secret-looking metadata", () => {
+    const payload = buildDashclawGuardPayload(
+      actionContext({
+        summary: "set TOKEN=sk_live_123 DATABASE_URL=postgres://user:pass@example.com/prod",
+        resourceLabel: "project:DATABASE_URL",
+      }),
+      localPreview,
+      "audit_123",
+    );
+
+    expect(JSON.stringify(payload)).not.toContain("postgres://");
+    expect(JSON.stringify(payload)).not.toContain("sk_live");
+    expect(JSON.stringify(payload)).not.toContain("TOKEN=");
+    expect(JSON.stringify(payload)).toContain("[redacted]");
+  });
+
+  it("fingerprints SQL without exposing raw SQL", () => {
+    const sql = "DELETE FROM customers WHERE email = 'a@example.com'";
+    const fp = sqlFingerprint(sql);
+
+    expect(fp).toBe(createHash("sha256").update(sql).digest("hex").slice(0, 16));
+    expect(fp).not.toContain("customers");
+    expect(fp).not.toContain("example.com");
+  });
+
+  it("previews local policy from the store", () => {
+    const store = { data: { policyRules: [] } } as Store;
+
+    expect(localPolicyPreview(store, actionContext())).toMatchObject({
+      effect: "approval_required",
+      source: "default:production_write",
+    });
+  });
+
+  it("calls DashClaw with mapped payload and normalizes response ids", async () => {
+    process.env.DASHCLAW_BASE_URL = "https://dashclaw.example";
+    process.env.DASHCLAW_API_KEY = "dc_secret";
+    const store = { data: { policyRules: [] } } as Store;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            decision: "approval_required",
+            reason: "Needs review",
+            decision_id: "gd_1",
+            actionId: "act_1",
+            verification_status: "pending",
+            signals: { risk: "production" },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    const decision = await guardWithDashclaw(store, actionContext(), "audit_123");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "https://dashclaw.example/api/guard",
+      expect.objectContaining({
+        method: "POST",
+        body: expect.stringContaining('"audit_correlation_id":"audit_123"'),
+      }),
+    );
+    expect(decision).toMatchObject({
+      decision: "require_approval",
+      reason: "Needs review",
+      decisionId: "gd_1",
+      actionId: "act_1",
+      verificationStatus: "pending",
+      signals: { risk: "production" },
+    });
   });
 });

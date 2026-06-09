@@ -302,7 +302,7 @@ git commit -m "feat: add dashclaw client foundation"
 - Modify: `src/dashclaw/guard.ts`
 - Modify: `test/dashclaw.test.ts`
 
-- [ ] **Step 1: Add failing payload mapping tests**
+- [x] **Step 1: Add failing payload mapping tests**
 
 Append to `test/dashclaw.test.ts`:
 
@@ -396,7 +396,7 @@ describe("DashClaw guard payload mapping", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests and verify mapping failures**
+- [x] **Step 2: Run tests and verify mapping failures**
 
 Run:
 
@@ -406,7 +406,7 @@ npm test -- test/dashclaw.test.ts
 
 Expected: fail because `buildDashclawGuardPayload`, `isRiskyAction`, and `sqlFingerprint` are not implemented.
 
-- [ ] **Step 3: Implement payload mapping**
+- [x] **Step 3: Implement payload mapping**
 
 Replace `src/dashclaw/guard.ts` with:
 
