@@ -525,7 +525,7 @@ export async function guardWithDashclaw(
 }
 ```
 
-- [ ] **Step 4: Remove unused imports and run focused tests**
+- [x] **Step 4: Remove unused imports and run focused tests**
 
 Run:
 
@@ -536,7 +536,7 @@ npm run typecheck
 
 Expected: pass. If TypeScript flags an unused `Capability` import, remove it from `src/dashclaw/guard.ts`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add src/dashclaw/guard.ts test/dashclaw.test.ts
