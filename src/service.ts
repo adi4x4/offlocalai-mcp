@@ -5,16 +5,20 @@ import { resolveEnvironment, resolveProject, requireMapping } from "./resolve.js
 import { defaultEnvVar } from "./providers/auth.js";
 import type {
   ActionContext,
+  AuditLogEntry,
   Capability,
   Environment,
   EnvironmentKind,
   PolicyEffect,
+  PendingApproval,
   PolicyRule,
   Project,
+  ProviderConnection,
   ProviderId,
   ProviderResource,
   Workspace,
 } from "./types.js";
+import { PROVIDER_IDS } from "./types.js";
 import { newId, nowIso, OfflocalError, slugify } from "./util.js";
 
 /**
@@ -51,7 +55,9 @@ export function createProject(
   input: { name: string; slug?: string; description?: string },
 ): Project {
   const ws = ensureDefaultWorkspace(store);
-  const slug = slugify(input.slug ?? input.name);
+  const name = input.name.trim();
+  if (!name) throw new OfflocalError("Project name must be a non-empty string.");
+  const slug = slugify(input.slug ?? name);
   if (!slug) throw new OfflocalError("Project name/slug produced an empty slug.");
   if (store.data.projects.some((p) => p.workspaceId === ws.id && p.slug === slug)) {
     throw new OfflocalError(`A project with slug "${slug}" already exists.`);
@@ -59,7 +65,7 @@ export function createProject(
   const project: Project = {
     id: newId("proj"),
     workspaceId: ws.id,
-    name: input.name,
+    name,
     slug,
     description: input.description,
     createdAt: nowIso(),
@@ -101,21 +107,26 @@ export function addEnvironment(
   store: Store,
   input: { project?: string; name: string; kind?: EnvironmentKind },
 ): Environment {
+  const name = input.name.trim();
+  if (!name) {
+    throw new OfflocalError("Environment name must be a non-empty string.");
+  }
+  if (input.kind !== undefined) assertEnvironmentKind(input.kind);
   const project = resolveProject(store, input.project);
-  const kind: EnvironmentKind = input.kind ?? KIND_BY_NAME[input.name.toLowerCase()] ?? "development";
+  const kind: EnvironmentKind = input.kind ?? KIND_BY_NAME[name.toLowerCase()] ?? "development";
   if (
     store.data.environments.some(
-      (e) => e.projectId === project.id && e.name === input.name,
+      (e) => e.projectId === project.id && e.name === name,
     )
   ) {
     throw new OfflocalError(
-      `Environment "${input.name}" already exists for project "${project.slug}".`,
+      `Environment "${name}" already exists for project "${project.slug}".`,
     );
   }
   const env: Environment = {
     id: newId("env"),
     projectId: project.id,
-    name: input.name,
+    name,
     kind,
     isProduction: kind === "production",
     createdAt: nowIso(),
@@ -144,11 +155,110 @@ export function getProjectContext(
 // Provider connections + mappings
 // ---------------------------------------------------------------------------
 
+function assertProviderId(provider: unknown): asserts provider is ProviderId {
+  if (typeof provider !== "string" || !PROVIDER_IDS.includes(provider as ProviderId)) {
+    throw new OfflocalError(`Unknown provider "${String(provider)}". Expected one of: ${PROVIDER_IDS.join(", ")}.`);
+  }
+}
+
+function requireNonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new OfflocalError(`Invalid provider resource: ${label} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function assertPositiveInteger(value: number | undefined, label: string): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new OfflocalError(`${label} must be a positive integer.`);
+  }
+}
+
+function validateProviderResource(provider: ProviderId, resource: ProviderResource): void {
+  if (!resource || typeof resource !== "object") {
+    throw new OfflocalError("Invalid provider resource: expected an object.");
+  }
+  if (resource.provider !== provider) {
+    throw new OfflocalError(
+      `Resource provider "${resource.provider}" does not match "${provider}".`,
+    );
+  }
+
+  switch (provider) {
+    case "github":
+      requireNonEmptyString((resource as Partial<{ owner: unknown }>).owner, "github.owner");
+      requireNonEmptyString((resource as Partial<{ repo: unknown }>).repo, "github.repo");
+      return;
+    case "vercel":
+      requireNonEmptyString((resource as Partial<{ projectId: unknown }>).projectId, "vercel.projectId");
+      return;
+    case "supabase":
+      requireNonEmptyString((resource as Partial<{ projectRef: unknown }>).projectRef, "supabase.projectRef");
+      return;
+    case "stripe": {
+      const mode = (resource as Partial<{ mode: unknown }>).mode;
+      if (mode !== "test" && mode !== "live") {
+        throw new OfflocalError('Invalid provider resource: stripe.mode must be "test" or "live".');
+      }
+      return;
+    }
+    case "railway":
+      requireNonEmptyString((resource as Partial<{ projectId: unknown }>).projectId, "railway.projectId");
+      return;
+  }
+}
+
+function assertPolicyEffect(effect: unknown): asserts effect is PolicyEffect {
+  if (effect !== "allow" && effect !== "block" && effect !== "approval_required") {
+    throw new OfflocalError('Invalid policy effect; expected "allow", "block", or "approval_required".');
+  }
+}
+
+function assertCapability(capability: unknown): asserts capability is Capability {
+  const capabilities: Capability[] = ["read", "write", "deploy", "env_change", "delete", "destructive_sql"];
+  if (typeof capability !== "string" || !capabilities.includes(capability as Capability)) {
+    throw new OfflocalError(
+      `Invalid policy capability "${String(capability)}". Expected one of: ${capabilities.join(", ")}.`,
+    );
+  }
+}
+
+function assertEnvironmentKind(kind: unknown): asserts kind is EnvironmentKind {
+  const kinds: EnvironmentKind[] = ["development", "staging", "production"];
+  if (typeof kind !== "string" || !kinds.includes(kind as EnvironmentKind)) {
+    throw new OfflocalError(
+      `Invalid environment kind "${String(kind)}". Expected one of: ${kinds.join(", ")}.`,
+    );
+  }
+}
+
+function validatePolicyRuleInput(input: {
+  effect: PolicyEffect;
+  priority?: number;
+  match: PolicyRule["match"];
+}): void {
+  assertPolicyEffect(input.effect);
+  if (input.priority !== undefined && (!Number.isFinite(input.priority) || input.priority < 0)) {
+    throw new OfflocalError("Invalid policy priority; expected a non-negative finite number.");
+  }
+  const match = input.match;
+  if (!match || typeof match !== "object") {
+    throw new OfflocalError("Invalid policy match; expected an object.");
+  }
+  if (match.provider !== undefined) assertProviderId(match.provider);
+  if (match.capability !== undefined) assertCapability(match.capability);
+  if (match.environmentKind !== undefined) assertEnvironmentKind(match.environmentKind);
+  if (match.projectId !== undefined) requireNonEmptyString(match.projectId, "policy.match.projectId");
+  if (match.environmentId !== undefined) requireNonEmptyString(match.environmentId, "policy.match.environmentId");
+}
+
 export function ensureConnection(
   store: Store,
   provider: ProviderId,
   opts?: { label?: string; envVar?: string; vercelTeamId?: string },
 ): string {
+  assertProviderId(provider);
   const existing = store.data.connections.find((c) => c.provider === provider);
   if (existing) return existing.id;
   const ws = ensureDefaultWorkspace(store);
@@ -167,6 +277,40 @@ export function ensureConnection(
   return id;
 }
 
+export function createConnection(
+  store: Store,
+  input: { provider: ProviderId; label: string; envVar: string; vercelTeamId?: string },
+): ProviderConnection {
+  assertProviderId(input.provider);
+  const label = requireNonEmptyString(input.label, "connection.label").trim();
+  const envVar = requireNonEmptyString(input.envVar, "connection.envVar").trim();
+  if (store.data.connections.some((c) => c.provider === input.provider && c.label === label)) {
+    throw new OfflocalError(`A ${input.provider} connection named "${label}" already exists.`);
+  }
+  const ws = ensureDefaultWorkspace(store);
+  const connection: ProviderConnection = {
+    id: newId("conn"),
+    workspaceId: ws.id,
+    provider: input.provider,
+    label,
+    auth: { kind: "env", envVar },
+    scope: input.vercelTeamId ? { vercelTeamId: input.vercelTeamId } : undefined,
+    createdAt: nowIso(),
+  };
+  store.update((s) => {
+    s.connections.push(connection);
+  });
+  return connection;
+}
+
+export function listConnections(store: Store, input: { provider?: ProviderId } = {}): ProviderConnection[] {
+  if (input.provider !== undefined) assertProviderId(input.provider);
+  return store.data.connections
+    .filter((c) => !input.provider || c.provider === input.provider)
+    .slice()
+    .sort((a, b) => a.provider.localeCompare(b.provider) || a.label.localeCompare(b.label));
+}
+
 export function mapProviderResource(
   store: Store,
   input: {
@@ -177,14 +321,27 @@ export function mapProviderResource(
     connectionId?: string;
   },
 ): { project: Project; environment: Environment; mappingId: string } {
+  assertProviderId(input.provider);
+  validateProviderResource(input.provider, input.resource);
   const project = resolveProject(store, input.project);
   const environment = resolveEnvironment(store, project, input.environment);
-  if (input.resource.provider !== input.provider) {
-    throw new OfflocalError(
-      `Resource provider "${input.resource.provider}" does not match "${input.provider}".`,
-    );
+  let connectionId = input.connectionId?.trim();
+  if (input.connectionId !== undefined) {
+    if (!connectionId) {
+      throw new OfflocalError("Connection id must be a non-empty string when provided.");
+    }
+    const connection = store.data.connections.find((c) => c.id === connectionId);
+    if (!connection) {
+      throw new OfflocalError(`Connection "${connectionId}" was not found.`);
+    }
+    if (connection.provider !== input.provider) {
+      throw new OfflocalError(
+        `Connection "${connectionId}" is for ${connection.provider}, not ${input.provider}.`,
+      );
+    }
+  } else {
+    connectionId = ensureConnection(store, input.provider);
   }
-  const connectionId = input.connectionId ?? ensureConnection(store, input.provider);
   const id = newId("map");
   store.update((s) => {
     // Replace any existing mapping for this env+provider (one resource per pair).
@@ -214,6 +371,7 @@ export function listProviderMappings(store: Store, projectRef?: string) {
       id: m.id,
       environment: envName(m.environmentId),
       provider: m.provider,
+      connectionId: m.connectionId,
       resource: m.resource,
     }));
 }
@@ -230,6 +388,7 @@ export function getProviderMapping(
     project: project.slug,
     environment: environment.name,
     provider: mapping.provider,
+    connectionId: mapping.connectionId,
     resource: mapping.resource,
   };
 }
@@ -248,6 +407,8 @@ export function checkPolicy(
     live?: boolean;
   },
 ) {
+  assertProviderId(input.provider);
+  assertCapability(input.capability);
   const project = resolveProject(store, input.project);
   const environment = resolveEnvironment(store, project, input.environment);
   const ctx: ActionContext = {
@@ -271,6 +432,46 @@ export function checkPolicy(
   };
 }
 
+export function simulateAction(
+  store: Store,
+  input: {
+    project?: string;
+    environment: string;
+    provider: ProviderId;
+    capability: Capability;
+    live?: boolean;
+    resourceLabel?: string;
+  },
+) {
+  assertProviderId(input.provider);
+  assertCapability(input.capability);
+  const project = resolveProject(store, input.project);
+  const environment = resolveEnvironment(store, project, input.environment);
+  const ctx: ActionContext = {
+    project,
+    environment,
+    provider: input.provider,
+    capability: input.capability,
+    tool: "simulate_action",
+    summary: `simulate ${input.provider}.${input.capability}`,
+    live: input.live,
+    resourceLabel: input.resourceLabel,
+  };
+  const decision = evaluatePolicy(store.data.policyRules, ctx);
+  return {
+    project: project.slug,
+    environment: environment.name,
+    provider: input.provider,
+    capability: input.capability,
+    live: !!input.live,
+    resourceLabel: input.resourceLabel,
+    effect: decision.effect,
+    reason: decision.reason,
+    source: decision.source,
+    wouldExecute: decision.effect === "allow",
+  };
+}
+
 export function listPolicyRules(store: Store): PolicyRule[] {
   return [...store.data.policyRules].sort((a, b) => b.priority - a.priority);
 }
@@ -284,6 +485,7 @@ export function setPolicyRule(
     match: PolicyRule["match"];
   },
 ): PolicyRule {
+  validatePolicyRuleInput(input);
   const rule: PolicyRule = {
     id: newId("rule"),
     description: input.description,
@@ -298,6 +500,130 @@ export function setPolicyRule(
   return rule;
 }
 
+function requirePendingApproval(store: Store, approvalId: string): PendingApproval {
+  const id = approvalId.trim();
+  if (!id) {
+    throw new OfflocalError("Approval id must be a non-empty string.");
+  }
+  const approval = store.data.pendingApprovals.find((a) => a.id === id);
+  if (!approval) {
+    throw new OfflocalError(`Approval request "${id}" was not found.`);
+  }
+  if (approval.status !== "pending") {
+    throw new OfflocalError(`Approval request "${id}" is already ${approval.status}.`);
+  }
+  return approval;
+}
+
+function approvalAuditContext(store: Store, approval: PendingApproval): {
+  projectSlug?: string;
+  environment?: string;
+  providerResource?: string;
+} {
+  const project = store.data.projects.find((p) => p.id === approval.projectId);
+  const environment = store.data.environments.find((e) => e.id === approval.environmentId);
+  return {
+    projectSlug: project?.slug,
+    environment: environment?.name,
+    providerResource: approval.providerResource,
+  };
+}
+
+function appendApprovalAudit(
+  store: Store,
+  approval: PendingApproval,
+  tool: "approve_action" | "reject_action",
+  result: "success" | "not_executed",
+  note?: string,
+): void {
+  const ctx = approvalAuditContext(store, approval);
+  store.appendAudit({
+    timestamp: nowIso(),
+    projectSlug: ctx.projectSlug,
+    environment: ctx.environment,
+    provider: "core",
+    tool,
+    actionSummary:
+      `${tool === "approve_action" ? "approved" : "rejected"} ${approval.id}: ${approval.actionSummary}`,
+    policyDecision: "n/a",
+    result,
+    errorMessage: note,
+    providerResource: ctx.providerResource,
+  });
+}
+
+export function listPendingApprovals(
+  store: Store,
+  input: { project?: string; status?: PendingApproval["status"] } = {},
+): PendingApproval[] {
+  let projectId: string | undefined;
+  if (input.project) projectId = resolveProject(store, input.project).id;
+  if (
+    input.status !== undefined &&
+    input.status !== "pending" &&
+    input.status !== "approved" &&
+    input.status !== "rejected" &&
+    input.status !== "used"
+  ) {
+    throw new OfflocalError('Invalid approval status; expected "pending", "approved", "rejected", or "used".');
+  }
+  return store.data.pendingApprovals
+    .filter((a) => !projectId || a.projectId === projectId)
+    .filter((a) => !input.status || a.status === input.status)
+    .slice()
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function approveAction(
+  store: Store,
+  input: { approvalId: string; note?: string },
+): { approval: PendingApproval } {
+  const approval = requirePendingApproval(store, input.approvalId);
+  const note = input.note?.trim();
+  if (input.note !== undefined && !note) {
+    throw new OfflocalError("Approval note must be non-empty when provided.");
+  }
+  const now = nowIso();
+  let updatedApproval = approval;
+  store.update((s) => {
+    const current = s.pendingApprovals.find((a) => a.id === approval.id);
+    if (!current || current.status !== "pending") {
+      throw new OfflocalError(`Approval request "${approval.id}" is no longer pending.`);
+    }
+    current.status = "approved";
+    current.decidedAt = now;
+    current.decisionNote = note;
+    updatedApproval = current;
+  });
+  appendApprovalAudit(store, updatedApproval, "approve_action", "success", note);
+  return { approval: updatedApproval };
+}
+
+export function rejectAction(
+  store: Store,
+  input: { approvalId: string; note?: string },
+): { approval: PendingApproval } {
+  const approval = requirePendingApproval(store, input.approvalId);
+  const note = input.note?.trim();
+  if (input.note !== undefined && !note) {
+    throw new OfflocalError("Rejection note must be non-empty when provided.");
+  }
+  const now = nowIso();
+  let updatedApproval = approval;
+  store.update((s) => {
+    const current = s.pendingApprovals.find((a) => a.id === approval.id);
+    if (!current || current.status !== "pending") {
+      throw new OfflocalError(`Approval request "${approval.id}" is no longer pending.`);
+    }
+    current.status = "rejected";
+    current.decidedAt = now;
+    current.decisionNote = note;
+    updatedApproval = current;
+  });
+  appendApprovalAudit(store, updatedApproval, "reject_action", "not_executed", note);
+  return { approval: updatedApproval };
+}
+
 // ---------------------------------------------------------------------------
 // Memory + audit
 // ---------------------------------------------------------------------------
@@ -306,6 +632,12 @@ export function writeProjectMemory(
   store: Store,
   input: { project?: string; environment?: string; note: string; tags?: string[] },
 ) {
+  const note = input.note.trim();
+  if (!note) throw new OfflocalError("Project memory note must be a non-empty string.");
+  const tags = input.tags?.map((tag) => tag.trim());
+  if (tags?.some((tag) => tag.length === 0)) {
+    throw new OfflocalError("Project memory tags must be non-empty strings.");
+  }
   const project = resolveProject(store, input.project);
   const environmentId = input.environment
     ? resolveEnvironment(store, project, input.environment).id
@@ -314,8 +646,8 @@ export function writeProjectMemory(
     id: newId("mem"),
     projectId: project.id,
     environmentId,
-    note: input.note,
-    tags: input.tags,
+    note,
+    tags,
     createdAt: nowIso(),
   };
   store.addMemory(entry);
@@ -337,6 +669,8 @@ export function listAuditLog(
   store: Store,
   input: { project?: string; environment?: string; provider?: ProviderId; limit?: number } = {},
 ) {
+  assertPositiveInteger(input.limit, "limit");
+  if (input.provider !== undefined) assertProviderId(input.provider);
   let projectSlug: string | undefined;
   if (input.project) projectSlug = resolveProject(store, input.project).slug;
   return store.readAudit(input.limit ?? 50, {
@@ -344,5 +678,224 @@ export function listAuditLog(
     environment: input.environment,
     provider: input.provider,
   });
+}
+
+type DoctorStatus = "pass" | "warn" | "fail";
+
+export interface DoctorCheck {
+  id: string;
+  status: DoctorStatus;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface DoctorReport {
+  status: DoctorStatus;
+  summary: { pass: number; warn: number; fail: number; total: number };
+  checks: DoctorCheck[];
+}
+
+function combineDoctorStatus(checks: DoctorCheck[]): DoctorStatus {
+  if (checks.some((check) => check.status === "fail")) return "fail";
+  if (checks.some((check) => check.status === "warn")) return "warn";
+  return "pass";
+}
+
+function envVarCheckId(provider: ProviderId): string {
+  return `env.${provider}`;
+}
+
+function connectionForMapping(store: Store, provider: ProviderId, connectionId?: string): ProviderConnection | undefined {
+  if (connectionId) return store.data.connections.find((c) => c.id === connectionId && c.provider === provider);
+  return store.data.connections.find((c) => c.provider === provider);
+}
+
+export function doctor(store: Store, input: { project?: string; environment?: string } = {}): DoctorReport {
+  const checks: DoctorCheck[] = [];
+  checks.push({
+    id: "storage.home",
+    status: "pass",
+    message: `Using local state directory ${store.paths.home}.`,
+  });
+
+  let project: Project | undefined;
+  try {
+    project = resolveProject(store, input.project);
+    checks.push({ id: "project", status: "pass", message: `Project ${project.slug} resolved.` });
+  } catch (err) {
+    checks.push({ id: "project", status: "fail", message: err instanceof Error ? err.message : String(err) });
+  }
+
+  let environments: Environment[] = [];
+  if (project) {
+    if (input.environment) {
+      try {
+        environments = [resolveEnvironment(store, project, input.environment)];
+        checks.push({ id: "environment", status: "pass", message: `Environment ${environments[0]!.name} resolved.` });
+      } catch (err) {
+        checks.push({ id: "environment", status: "fail", message: err instanceof Error ? err.message : String(err) });
+      }
+    } else {
+      environments = store.data.environments.filter((env) => env.projectId === project!.id);
+      checks.push({
+        id: "environment",
+        status: environments.length > 0 ? "pass" : "warn",
+        message: environments.length > 0 ? `${environments.length} environment(s) configured.` : "No environments configured.",
+      });
+    }
+  }
+
+  const seenProviders = new Set<ProviderId>();
+  for (const env of environments) {
+    const mappings = store.data.mappings.filter((mapping) => mapping.environmentId === env.id);
+    checks.push({
+      id: `mappings.${env.name}`,
+      status: mappings.length > 0 ? "pass" : "warn",
+      message: mappings.length > 0 ? `${mappings.length} provider mapping(s) for ${env.name}.` : `No provider mappings for ${env.name}.`,
+    });
+    for (const provider of PROVIDER_IDS) {
+      const mapping = mappings.find((m) => m.provider === provider);
+      if (!mapping) {
+        checks.push({ id: `mapping.${provider}`, status: "warn", message: `No ${provider} mapping for ${env.name}.` });
+        continue;
+      }
+      checks.push({
+        id: `mapping.${provider}`,
+        status: "pass",
+        message: `${provider} mapping configured for ${env.name}.`,
+        details: { connectionId: mapping.connectionId, resource: mapping.resource },
+      });
+      seenProviders.add(provider);
+      const connection = connectionForMapping(store, provider, mapping.connectionId);
+      const envVar = connection?.auth.envVar ?? defaultEnvVar(provider);
+      const present = typeof process.env[envVar] === "string" && process.env[envVar]!.trim().length > 0;
+      checks.push({
+        id: envVarCheckId(provider),
+        status: present ? "pass" : "warn",
+        message: present ? `${envVar} is set for ${provider}.` : `${envVar} is not set for ${provider}.`,
+      });
+    }
+  }
+
+  for (const provider of store.data.connections.map((connection) => connection.provider)) {
+    if (!seenProviders.has(provider)) {
+      const connection = store.data.connections.find((c) => c.provider === provider)!;
+      const present = typeof process.env[connection.auth.envVar] === "string" && process.env[connection.auth.envVar]!.trim().length > 0;
+      checks.push({
+        id: envVarCheckId(provider),
+        status: present ? "pass" : "warn",
+        message: present ? `${connection.auth.envVar} is set for ${provider}.` : `${connection.auth.envVar} is not set for ${provider}.`,
+      });
+    }
+  }
+
+  try {
+    store.appendAudit({
+      timestamp: nowIso(),
+      provider: "core",
+      tool: "doctor",
+      actionSummary: "doctor audit writability check",
+      policyDecision: "n/a",
+      result: "success",
+    });
+    checks.push({ id: "audit.writable", status: "pass", message: "Audit log is writable." });
+  } catch (err) {
+    checks.push({ id: "audit.writable", status: "fail", message: err instanceof Error ? err.message : String(err) });
+  }
+
+  const summary = {
+    pass: checks.filter((check) => check.status === "pass").length,
+    warn: checks.filter((check) => check.status === "warn").length,
+    fail: checks.filter((check) => check.status === "fail").length,
+    total: checks.length,
+  };
+  return { status: combineDoctorStatus(checks), summary, checks };
+}
+
+function csvEscape(value: unknown): string {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+function auditExportRows(entries: AuditLogEntry[]): string[][] {
+  return entries.map((entry) => [
+    entry.timestamp,
+    entry.projectSlug ?? "",
+    entry.environment ?? "",
+    entry.provider ?? "",
+    entry.tool,
+    entry.policyDecision,
+    entry.result,
+    entry.providerResource ?? "",
+    entry.errorMessage ?? "",
+  ]);
+}
+
+export function exportAuditLog(
+  store: Store,
+  input: {
+    project?: string;
+    environment?: string;
+    provider?: ProviderId;
+    limit?: number;
+    format: "jsonl" | "csv" | "markdown";
+  },
+): string {
+  const entries = listAuditLog(store, input);
+  if (input.format === "jsonl") {
+    return entries.map((entry) => JSON.stringify(entry)).join("\n");
+  }
+  const headers = ["timestamp", "project", "environment", "provider", "tool", "policyDecision", "result", "providerResource", "errorMessage"];
+  const rows = auditExportRows(entries);
+  if (input.format === "csv") {
+    return [headers, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n");
+  }
+  if (input.format === "markdown") {
+    const titleHeaders = ["Timestamp", "Project", "Environment", "Provider", "Tool", "Policy", "Result", "Resource", "Error"];
+    return [
+      `| ${titleHeaders.join(" | ")} |`,
+      `| ${titleHeaders.map(() => "---").join(" | ")} |`,
+      ...rows.map((row) => `| ${row.map((cell) => String(cell).replace(/\|/g, "\\|")).join(" | ")} |`),
+    ].join("\n");
+  }
+  throw new OfflocalError('Audit export format must be "jsonl", "csv", or "markdown".');
+}
+
+export async function exportContextSnapshot(
+  store: Store,
+  input: { project?: string; environment?: string; format: "json" | "markdown" },
+): Promise<string> {
+  if (input.format !== "json" && input.format !== "markdown") {
+    throw new OfflocalError('Context snapshot format must be "json" or "markdown".');
+  }
+  const context = await getProjectContext(store, input.project, input.environment);
+  const snapshot = {
+    schema: "offlocal.context.snapshot.v1",
+    exportedAt: nowIso(),
+    context,
+  };
+  if (input.format === "json") {
+    return JSON.stringify(snapshot, null, 2);
+  }
+  return [
+    `# offlocal context snapshot: ${context.project.slug}`,
+    "",
+    `Exported: ${snapshot.exportedAt}`,
+    context.focusedEnvironment ? `Environment: ${context.focusedEnvironment}` : undefined,
+    "",
+    "## Summary",
+    "",
+    context.summary,
+    "",
+    "## Policy defaults",
+    "",
+    ...context.policyDefaults.map((item) => `- ${item}`),
+    "",
+    "## Notes",
+    "",
+    context.notes,
+  ]
+    .filter((line): line is string => line !== undefined)
+    .join("\n");
 }
 

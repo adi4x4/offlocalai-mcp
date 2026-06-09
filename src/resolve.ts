@@ -86,7 +86,7 @@ export function findConnection(
   connectionId?: string,
 ): ProviderConnection | undefined {
   if (connectionId) {
-    return store.data.connections.find((c) => c.id === connectionId);
+    return store.data.connections.find((c) => c.id === connectionId && c.provider === provider);
   }
   return store.data.connections.find((c) => c.provider === provider);
 }

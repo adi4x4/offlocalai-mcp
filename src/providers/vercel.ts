@@ -146,7 +146,13 @@ export async function setEnvVar(
 
 export async function createDeployment(
   token: string,
-  params: { name: string; project: string; target?: string; deploymentId?: string },
+  params: {
+    name: string;
+    project: string;
+    target?: string;
+    deploymentId?: string;
+    gitSource?: { type: "github"; repoId: string; ref?: string; sha?: string };
+  },
   teamId?: string,
 ): Promise<Record<string, unknown>> {
   const body: Record<string, unknown> = {
@@ -155,6 +161,14 @@ export async function createDeployment(
     target: params.target ?? "preview",
   };
   if (params.deploymentId) body.deploymentId = params.deploymentId;
+  if (params.gitSource) {
+    body.gitSource = {
+      type: params.gitSource.type,
+      repoId: params.gitSource.repoId,
+      ref: params.gitSource.ref,
+      sha: params.gitSource.sha,
+    };
+  }
   return httpJson<Record<string, unknown>>(`${BASE}/v13/deployments`, {
     method: "POST",
     headers: { ...headers(token), "Content-Type": "application/json" },

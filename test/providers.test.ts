@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdirSync } from "node:fs";
 import { freshStore, seedAcme } from "./helpers.js";
 import * as pa from "../src/provider-actions.js";
-import { listAuditLog, mapProviderResource } from "../src/service.js";
+import { approveAction, listAuditLog, listPendingApprovals, mapProviderResource, rejectAction } from "../src/service.js";
 import type { Store } from "../src/storage.js";
 
 /**
@@ -26,12 +27,17 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   process.env.STRIPE_TEST_SECRET_KEY = "sk_test_dummy";
   process.env.STRIPE_LIVE_SECRET_KEY = "sk_live_dummy";
+  process.env.GITHUB_TOKEN = "gh_dummy";
   process.env.VERCEL_TOKEN = "vc_dummy";
   process.env.SUPABASE_ACCESS_TOKEN = "sb_dummy";
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  delete process.env.CUSTOM_GITHUB_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.CUSTOM_VERCEL_TOKEN;
+  delete process.env.CUSTOM_STRIPE_TEST_KEY;
 });
 
 function lastAudit(store: Store) {
@@ -39,6 +45,39 @@ function lastAudit(store: Store) {
 }
 
 describe("Stripe", () => {
+  it("uses the mapping connection token for Stripe calls", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    process.env.CUSTOM_STRIPE_TEST_KEY = "sk_test_custom";
+    store.update((s) => {
+      s.connections.push({
+        id: "conn_custom_stripe",
+        workspaceId: s.defaultWorkspaceId!,
+        provider: "stripe",
+        label: "custom-stripe",
+        auth: { kind: "env", envVar: "CUSTOM_STRIPE_TEST_KEY" },
+        createdAt: new Date().toISOString(),
+      });
+    });
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "stripe",
+      connectionId: "conn_custom_stripe",
+      resource: { provider: "stripe", mode: "test" },
+    });
+    fetchMock.mockResolvedValueOnce(mockOk({ data: [{ id: "prod_123", name: "Pro", active: true, created: 1 }] }));
+
+    const res = await pa.stripeListProducts(store, { environment: "staging", limit: 1 });
+
+    expect(res.status).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.stripe.com/v1/products?limit=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk_test_custom" }),
+      }),
+    );
+  });
+
   it("allows test-mode writes and executes them", async () => {
     const store = freshStore();
     seedAcme(store);
@@ -64,12 +103,206 @@ describe("Stripe", () => {
   });
 });
 
+describe("mapped provider connections", () => {
+  it("uses the mapping connection token for provider calls", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    process.env.CUSTOM_GITHUB_TOKEN = "gh_custom";
+    store.update((s) => {
+      s.connections.push({
+        id: "conn_custom_github",
+        workspaceId: s.defaultWorkspaceId!,
+        provider: "github",
+        label: "custom-github",
+        auth: { kind: "env", envVar: "CUSTOM_GITHUB_TOKEN" },
+        createdAt: new Date().toISOString(),
+      });
+    });
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "github",
+      connectionId: "conn_custom_github",
+      resource: { provider: "github", owner: "acme", repo: "acme-crm" },
+    });
+    fetchMock.mockResolvedValueOnce(mockOk({
+      full_name: "acme/acme-crm",
+      default_branch: "main",
+      private: true,
+      pushed_at: "2026-06-09T12:00:00.000Z",
+      open_issues_count: 0,
+      html_url: "https://github.com/acme/acme-crm",
+    }));
+
+    const res = await pa.githubRepoContext(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/acme-crm",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer gh_custom" }),
+      }),
+    );
+  });
+
+  it("retries transient read failures for idempotent provider calls", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ message: "temporary" }), { status: 503, statusText: "Service Unavailable" }))
+      .mockResolvedValueOnce(mockOk({
+        full_name: "acme/acme-crm",
+        default_branch: "main",
+        private: true,
+        pushed_at: "2026-06-09T12:00:00.000Z",
+        open_issues_count: 0,
+        html_url: "https://github.com/acme/acme-crm",
+      }));
+
+    const res = await pa.githubRepoContext(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails clearly when provider responses have the wrong shape", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockResolvedValueOnce(mockOk({ default_branch: "main" }));
+
+    const res = await pa.githubRepoContext(store, { environment: "staging" });
+
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/github repo.*full_name/i);
+    expect(lastAudit(store)).toMatchObject({ result: "error", provider: "github" });
+  });
+
+  it("lists GitHub pull requests through the guarded read path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockResolvedValueOnce(mockOk([
+      {
+        number: 7,
+        title: "Ship feature",
+        state: "open",
+        draft: false,
+        head: { ref: "feature" },
+        base: { ref: "main" },
+        html_url: "https://github.com/acme/acme-crm/pull/7",
+        updated_at: "2026-06-09T12:00:00.000Z",
+      },
+    ]));
+
+    const res = await pa.githubPullRequests(store, { environment: "staging", limit: 1 });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data[0]).toMatchObject({ number: 7, headRef: "feature", baseRef: "main" });
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "github", tool: "list_github_pull_requests" });
+  });
+});
+
 describe("Vercel", () => {
+  it("uses the mapping connection token and team scope for Vercel calls", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    process.env.CUSTOM_VERCEL_TOKEN = "vc_custom";
+    store.update((s) => {
+      s.connections.push({
+        id: "conn_custom_vercel",
+        workspaceId: s.defaultWorkspaceId!,
+        provider: "vercel",
+        label: "custom-vercel",
+        auth: { kind: "env", envVar: "CUSTOM_VERCEL_TOKEN" },
+        scope: { vercelTeamId: "team_custom" },
+        createdAt: new Date().toISOString(),
+      });
+    });
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "vercel",
+      connectionId: "conn_custom_vercel",
+      resource: { provider: "vercel", projectId: "acme-preview" },
+    });
+    fetchMock.mockResolvedValueOnce(mockOk({ deployments: [] }));
+
+    const res = await pa.vercelDeployments(store, { environment: "staging", limit: 3 });
+
+    expect(res.status).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining("https://api.vercel.com/v7/deployments?teamId=team_custom"),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer vc_custom" }),
+      }),
+    );
+  });
+
+  it("rejects invalid deployment list limits before calling Vercel", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const res = await pa.vercelDeployments(store, { environment: "staging", limit: -1 });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/limit/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("requires approval for production deploys and does NOT execute them", async () => {
     const store = freshStore();
     seedAcme(store);
     const res = await pa.vercelCreateDeployment(store, { environment: "production" });
     expect(res.status).toBe("approval_required");
+    expect((res as any).approval_id).toMatch(/^approval_/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(listPendingApprovals(store, { project: "acme-crm" })).toHaveLength(1);
+  });
+
+  it("approves exactly one matching production deploy rerun", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const gated = await pa.vercelCreateDeployment(store, { environment: "production" });
+    expect(gated.status).toBe("approval_required");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const approved = approveAction(store, {
+      approvalId: (gated as any).approval_id,
+      note: "Reviewed deployment plan.",
+    });
+    expect(approved.approval.status).toBe("approved");
+    expect(lastAudit(store)).toMatchObject({
+      provider: "core",
+      tool: "approve_action",
+      result: "success",
+      policyDecision: "n/a",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const rerun = await pa.vercelCreateDeployment(store, { environment: "production" });
+    expect(rerun.status).toBe("ok");
+    expect(listPendingApprovals(store, { status: "used" as any })[0]).toMatchObject({
+      id: (gated as any).approval_id,
+      status: "used",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const secondRerun = await pa.vercelCreateDeployment(store, { environment: "production" });
+    expect(secondRerun.status).toBe("approval_required");
+    expect((secondRerun as any).approval_id).not.toBe((gated as any).approval_id);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a pending approval and keeps the production action gated", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const gated = await pa.vercelCreateDeployment(store, { environment: "production" });
+    rejectAction(store, { approvalId: (gated as any).approval_id, note: "Not safe yet." });
+    expect(lastAudit(store)).toMatchObject({
+      provider: "core",
+      tool: "reject_action",
+      result: "not_executed",
+      policyDecision: "n/a",
+    });
+
+    const rerun = await pa.vercelCreateDeployment(store, { environment: "production" });
+    expect(rerun.status).toBe("approval_required");
+    expect((rerun as any).approval_id).not.toBe((gated as any).approval_id);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -85,12 +318,38 @@ describe("Vercel", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects empty env-var keys before calling Vercel", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const res = await pa.vercelSetEnvVar(store, {
+      environment: "staging",
+      key: "   ",
+      value: "value",
+    });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/key/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("allows and executes a non-production (preview) deploy", async () => {
     const store = freshStore();
     seedAcme(store);
     const res = await pa.vercelCreateDeployment(store, { environment: "staging" });
     expect(res.status).toBe("ok");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not execute an allowed provider action when the audit log cannot be reserved", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mkdirSync(`${store.paths.audit}.lock`);
+
+    const res = await pa.vercelCreateDeployment(store, { environment: "staging" });
+
+    expect(res.status).toBe("error");
+    expect(res.executed).toBe(false);
+    expect((res as any).error).toMatch(/audit/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -156,6 +415,15 @@ describe("App logs", () => {
     const data = (res as any).data;
     expect(data.logs).toHaveLength(0);
     expect(typeof data.limitation).toBe("string");
+  });
+
+  it("rejects invalid since filters before calling Vercel", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const res = await pa.vercelLogs(store, { environment: "staging", since: "not a timestamp" });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/since/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("get_app_logs with no provider discovers the mapped Vercel project and audits the read", async () => {
@@ -234,6 +502,26 @@ describe("Railway logs", () => {
     expect(data.logs).toHaveLength(2);
     expect(data.logs[1]).toMatchObject({ level: "error", message: "Boom: missing DATABASE_URL" });
     expect(lastAudit(store)).toMatchObject({ result: "success", provider: "railway", tool: "get_railway_logs" });
+  });
+
+  it("rejects invalid log limits before calling Railway", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailway(store);
+    const res = await pa.railwayLogs(store, { environment: "staging", limit: -5 });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/limit/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid since filters before calling Railway", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailway(store);
+    const res = await pa.railwayLogs(store, { environment: "staging", since: "not a timestamp" });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/since/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("get_app_logs with no provider reads BOTH vercel and railway (vercel first)", async () => {
@@ -351,6 +639,17 @@ describe("Railway writes", () => {
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
     expect(body.variables.input).toMatchObject({ name: "FEATURE_FLAG", value: "on", environmentId: "rw_env_1" });
   });
+
+  it("rejects empty variable keys before calling Railway", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailwayTo(store, "staging");
+    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    const res = await pa.railwaySetEnvVar(store, { environment: "staging", key: " ", value: "on" });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/key/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("Supabase", () => {
@@ -383,5 +682,54 @@ describe("Supabase", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
     expect(body.read_only).toBe(true);
+  });
+
+  it("rejects empty SQL before calling Supabase", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const res = await pa.supabaseQuery(store, { environment: "staging", sql: "   " });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/sql/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Stripe price validation", () => {
+  it("lists Stripe customers through the guarded read path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockResolvedValueOnce(mockOk({ data: [{ id: "cus_123", email: "a@example.com", name: "Ada", created: 1 }] }));
+
+    const res = await pa.stripeListCustomers(store, { environment: "staging", limit: 1 });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data[0]).toMatchObject({ id: "cus_123", email: "a@example.com" });
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "stripe", tool: "list_stripe_customers" });
+  });
+
+  it("rejects empty product names before calling Stripe", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const res = await pa.stripeCreateProduct(store, {
+      environment: "staging",
+      name: "   ",
+    });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/name/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-positive price amounts before calling Stripe", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const res = await pa.stripeCreatePrice(store, {
+      environment: "staging",
+      product: "prod_123",
+      currency: "usd",
+      unitAmount: 0,
+    });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/unitAmount/i);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

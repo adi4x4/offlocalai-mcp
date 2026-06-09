@@ -206,6 +206,25 @@ export interface PolicyDecision {
   source: string;
 }
 
+export type ApprovalStatus = "pending" | "approved" | "rejected" | "used";
+
+export interface PendingApproval {
+  id: string;
+  projectId: string;
+  environmentId: string;
+  provider: ProviderId;
+  capability: Capability;
+  tool: string;
+  actionSummary: string;
+  reason: string;
+  providerResource?: string;
+  status: ApprovalStatus;
+  createdAt: string;
+  decidedAt?: string;
+  usedAt?: string;
+  decisionNote?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Audit + memory
 // ---------------------------------------------------------------------------
@@ -250,6 +269,7 @@ export interface OfflocalState {
   connections: ProviderConnection[];
   mappings: ProviderMapping[];
   policyRules: PolicyRule[];
+  pendingApprovals: PendingApproval[];
   /** Currently selected project id (for tools that omit an explicit project). */
   selectedProjectId?: string;
   /** Default workspace id. */

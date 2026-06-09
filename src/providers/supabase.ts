@@ -65,3 +65,44 @@ export async function runQuery(
     body: JSON.stringify({ query, read_only: readOnly }),
   });
 }
+
+export interface SupabaseLogEntry {
+  timestamp?: string;
+  level?: string;
+  message?: string;
+  service?: string;
+}
+
+export async function getProjectLogs(
+  token: string,
+  ref: string,
+  params: { service?: string; since?: string; limit?: number } = {},
+): Promise<SupabaseLogEntry[]> {
+  const data = await httpJson<any>(`${BASE}/projects/${ref}/logs`, {
+    headers: headers(token),
+    query: {
+      service: params.service,
+      since: params.since,
+      limit: String(params.limit ?? 100),
+    },
+  });
+  const rows = Array.isArray(data) ? data : data?.logs ?? data?.data ?? [];
+  return rows.map((entry: Record<string, any>) => ({
+    timestamp: entry.timestamp ?? entry.inserted_at ?? entry.created_at,
+    level: entry.level ?? entry.severity,
+    message: entry.message ?? entry.event_message ?? entry.body,
+    service: entry.service ?? params.service,
+  }));
+}
+
+export async function applyMigration(
+  token: string,
+  ref: string,
+  params: { name: string; query: string },
+): Promise<unknown> {
+  return httpJson<unknown>(`${BASE}/projects/${ref}/database/migrations`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify({ name: params.name, query: params.query }),
+  });
+}

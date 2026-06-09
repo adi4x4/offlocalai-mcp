@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdirSync } from "node:fs";
 import { freshStore, seedAcme } from "./helpers.js";
 import {
   addEnvironment,
@@ -7,11 +8,32 @@ import {
   listEnvironments,
   listProviderMappings,
   getProviderMapping,
+  ensureConnection,
   mapProviderResource,
   readProjectMemory,
   writeProjectMemory,
   listAuditLog,
 } from "../src/service.js";
+
+let fetchMock: ReturnType<typeof vi.fn>;
+
+function mockOk(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+beforeEach(() => {
+  fetchMock = vi.fn(async () => mockOk({ deployments: [] }));
+  vi.stubGlobal("fetch", fetchMock);
+  process.env.VERCEL_TOKEN = "vc_dummy";
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete process.env.VERCEL_TOKEN;
+});
 
 describe("project + environment lifecycle", () => {
   it("creates a project and selects it by default", () => {
@@ -27,6 +49,12 @@ describe("project + environment lifecycle", () => {
     expect(() => createProject(store, { name: "Acme CRM" })).toThrow(/already exists/);
   });
 
+  it("rejects empty project display names even when a slug is supplied", () => {
+    const store = freshStore();
+    expect(() => createProject(store, { name: "   ", slug: "acme-crm" })).toThrow(/project name/i);
+    expect(store.data.projects).toHaveLength(0);
+  });
+
   it("adds environments and infers kind from name", () => {
     const store = freshStore();
     createProject(store, { name: "Acme CRM" });
@@ -37,6 +65,22 @@ describe("project + environment lifecycle", () => {
     expect(prod.kind).toBe("production");
     expect(prod.isProduction).toBe(true);
     expect(listEnvironments(store)).toHaveLength(2);
+  });
+
+  it("rejects empty environment names", () => {
+    const store = freshStore();
+    createProject(store, { name: "Acme CRM" });
+
+    expect(() => addEnvironment(store, { name: "   " })).toThrow(/environment name/i);
+    expect(listEnvironments(store)).toHaveLength(0);
+  });
+
+  it("rejects invalid environment kinds at runtime", () => {
+    const store = freshStore();
+    createProject(store, { name: "Acme CRM" });
+
+    expect(() => addEnvironment(store, { name: "qa", kind: "prod-like" as any })).toThrow(/environment kind/i);
+    expect(listEnvironments(store)).toHaveLength(0);
   });
 });
 
@@ -72,6 +116,68 @@ describe("provider mappings", () => {
     expect(listProviderMappings(store)).toHaveLength(1);
     const m = getProviderMapping(store, { environment: "staging", provider: "stripe" });
     expect(m.resource).toMatchObject({ mode: "live" });
+  });
+
+  it("rejects unknown providers at runtime", () => {
+    const store = freshStore();
+    createProject(store, { name: "Acme CRM" });
+    addEnvironment(store, { name: "staging" });
+
+    expect(() =>
+      mapProviderResource(store, {
+        environment: "staging",
+        provider: "not-a-provider" as any,
+        resource: { provider: "not-a-provider" } as any,
+      }),
+    ).toThrow(/unknown provider/i);
+  });
+
+  it("rejects malformed provider resources before persisting mappings", () => {
+    const store = freshStore();
+    createProject(store, { name: "Acme CRM" });
+    addEnvironment(store, { name: "staging" });
+
+    expect(() =>
+      mapProviderResource(store, {
+        environment: "staging",
+        provider: "github",
+        resource: { provider: "github", owner: "acme" } as any,
+      }),
+    ).toThrow(/github.*repo/i);
+    expect(listProviderMappings(store)).toHaveLength(0);
+  });
+
+  it("rejects missing explicit provider connections before persisting mappings", () => {
+    const store = freshStore();
+    createProject(store, { name: "Acme CRM" });
+    addEnvironment(store, { name: "staging" });
+
+    expect(() =>
+      mapProviderResource(store, {
+        environment: "staging",
+        provider: "vercel",
+        connectionId: "conn_missing",
+        resource: { provider: "vercel", projectId: "acme-preview" },
+      }),
+    ).toThrow(/connection.*not found/i);
+    expect(listProviderMappings(store)).toHaveLength(0);
+  });
+
+  it("rejects provider mappings that reference a connection for another provider", () => {
+    const store = freshStore();
+    createProject(store, { name: "Acme CRM" });
+    addEnvironment(store, { name: "staging" });
+    const githubConnectionId = ensureConnection(store, "github");
+
+    expect(() =>
+      mapProviderResource(store, {
+        environment: "staging",
+        provider: "vercel",
+        connectionId: githubConnectionId,
+        resource: { provider: "vercel", projectId: "acme-preview" },
+      }),
+    ).toThrow(/github.*not vercel/i);
+    expect(listProviderMappings(store)).toHaveLength(0);
   });
 });
 
@@ -114,6 +220,35 @@ describe("get_project_context (killer tool)", () => {
     expect(ctx.focusedEnvironment).toBe("staging");
     expect(ctx.environments).toHaveLength(1);
   });
+
+  it("audits the embedded live Vercel snapshot read", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockResolvedValueOnce(mockOk({
+      deployments: [{ uid: "dpl_123", url: "acme.vercel.app", readyState: "READY", createdAt: 1700000000000 }],
+    }));
+
+    const ctx = await getProjectContext(store, "acme-crm", "staging");
+
+    expect(ctx.environments[0]!.deployment.latest?.state).toBe("READY");
+    expect(listAuditLog(store, { project: "acme-crm" })[0]).toMatchObject({
+      provider: "vercel",
+      tool: "get_project_context",
+      policyDecision: "allow",
+      result: "success",
+    });
+  });
+
+  it("does not call Vercel for live context when the audit log cannot be reserved", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mkdirSync(`${store.paths.audit}.lock`);
+
+    const ctx = await getProjectContext(store, "acme-crm", "staging");
+
+    expect(ctx.environments[0]!.deployment.liveDataError).toMatch(/audit/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("project memory", () => {
@@ -132,6 +267,26 @@ describe("project memory", () => {
     const all = readProjectMemory(store, { project: "acme-crm" });
     expect(all.length).toBeGreaterThanOrEqual(2);
   });
+
+  it("rejects empty memory notes before persisting", () => {
+    const store = freshStore();
+    seedAcme(store);
+    const before = readProjectMemory(store, { project: "acme-crm" }).length;
+
+    expect(() => writeProjectMemory(store, { project: "acme-crm", note: "   " })).toThrow(/memory note/i);
+    expect(readProjectMemory(store, { project: "acme-crm" })).toHaveLength(before);
+  });
+
+  it("rejects empty memory tags before persisting", () => {
+    const store = freshStore();
+    seedAcme(store);
+    const before = readProjectMemory(store, { project: "acme-crm" }).length;
+
+    expect(() =>
+      writeProjectMemory(store, { project: "acme-crm", note: "Useful note.", tags: ["incident", " "] }),
+    ).toThrow(/memory tag/i);
+    expect(readProjectMemory(store, { project: "acme-crm" })).toHaveLength(before);
+  });
 });
 
 describe("audit log", () => {
@@ -139,5 +294,17 @@ describe("audit log", () => {
     const store = freshStore();
     seedAcme(store);
     expect(listAuditLog(store, { project: "acme-crm" })).toHaveLength(0);
+  });
+
+  it("rejects invalid audit log limits", () => {
+    const store = freshStore();
+    seedAcme(store);
+    expect(() => listAuditLog(store, { project: "acme-crm", limit: -1 })).toThrow(/limit/i);
+  });
+
+  it("rejects invalid audit provider filters", () => {
+    const store = freshStore();
+    seedAcme(store);
+    expect(() => listAuditLog(store, { project: "acme-crm", provider: "unknown" as any })).toThrow(/provider/i);
   });
 });

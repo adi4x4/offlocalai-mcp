@@ -47,6 +47,32 @@ export interface RailwayProject {
   services: Array<{ id: string; name: string }>;
 }
 
+export async function listProjects(token: string): Promise<RailwayProject[]> {
+  const query = `query projects {
+    projects {
+      edges {
+        node {
+          id
+          name
+          environments { edges { node { id name } } }
+          services { edges { node { id name } } }
+        }
+      }
+    }
+  }`;
+  const data = await gql<{ projects: { edges?: any[] } }>(token, query, {});
+  const edges = (conn: any): any[] => (Array.isArray(conn?.edges) ? conn.edges : []);
+  return (data.projects?.edges ?? []).map((edge) => {
+    const p = edge.node;
+    return {
+      id: p.id,
+      name: p.name,
+      environments: edges(p.environments).map((e) => ({ id: e.node.id, name: e.node.name })),
+      services: edges(p.services).map((e) => ({ id: e.node.id, name: e.node.name })),
+    };
+  });
+}
+
 export async function getProject(token: string, projectId: string): Promise<RailwayProject> {
   const query = `query project($id: String!) {
     project(id: $id) {

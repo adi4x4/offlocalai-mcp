@@ -43,6 +43,19 @@ function guard<A>(fn: (args: A) => unknown | Promise<unknown>) {
 
 const provider = z.enum(["github", "vercel", "supabase", "stripe", "railway"]);
 const capability = z.enum(["read", "write", "deploy", "env_change", "delete", "destructive_sql"]);
+const nonEmptyString = (description?: string) => {
+  const schema = z.string().trim().min(1);
+  return description ? schema.describe(description) : schema;
+};
+const optionalNonEmptyString = (description?: string) => nonEmptyString(description).optional();
+const positiveInt = (description?: string) => {
+  const schema = z.number().int().positive();
+  return description ? schema.describe(description) : schema;
+};
+const nonNegativeInt = (description?: string) => {
+  const schema = z.number().int().nonnegative();
+  return description ? schema.describe(description) : schema;
+};
 
 export function registerTools(server: McpServer, store: Store): void {
   // --- Project / workspace -------------------------------------------------
@@ -63,8 +76,8 @@ export function registerTools(server: McpServer, store: Store): void {
       title: "Create project",
       description: "Create a new project in the default workspace.",
       inputSchema: {
-        name: z.string().describe("Display name, e.g. 'Your Project'"),
-        slug: z.string().optional().describe("Optional id-safe slug; derived from name if omitted"),
+        name: nonEmptyString("Display name, e.g. 'Your Project'"),
+        slug: optionalNonEmptyString("Optional id-safe slug; derived from name if omitted"),
         description: z.string().optional(),
       },
     },
@@ -79,7 +92,7 @@ export function registerTools(server: McpServer, store: Store): void {
     {
       title: "Select project",
       description: "Set the active project used by tools that omit an explicit project arg.",
-      inputSchema: { project: z.string().describe("Project id or slug") },
+      inputSchema: { project: nonEmptyString("Project id or slug") },
     },
     guard((a: { project: string }) => ({ status: "ok", project: svc.selectProject(store, a.project) })),
   );
@@ -95,8 +108,8 @@ export function registerTools(server: McpServer, store: Store): void {
         "history, suggested safe next actions, and a human-readable summary. Pass `environment` to " +
         "focus on one (recommended); otherwise all environments are returned.",
       inputSchema: {
-        project: z.string().optional().describe("Project id or slug; uses selected if omitted"),
-        environment: z.string().optional().describe("Environment id or name to focus on (e.g. 'staging')"),
+        project: optionalNonEmptyString("Project id or slug; uses selected if omitted"),
+        environment: optionalNonEmptyString("Environment id or name to focus on (e.g. 'staging')"),
       },
     },
     guard(async (a: { project?: string; environment?: string }) => ({
@@ -106,13 +119,31 @@ export function registerTools(server: McpServer, store: Store): void {
   );
 
   server.registerTool(
+    "export_context",
+    {
+      title: "Export context snapshot",
+      description: "Export a versioned project context snapshot as JSON or Markdown.",
+      inputSchema: {
+        project: optionalNonEmptyString("Project id or slug; uses selected if omitted"),
+        environment: optionalNonEmptyString("Environment id or name to focus on"),
+        format: z.enum(["json", "markdown"]),
+      },
+    },
+    guard(async (a: { project?: string; environment?: string; format: "json" | "markdown" }) => ({
+      status: "ok",
+      format: a.format,
+      text: await svc.exportContextSnapshot(store, a),
+    })),
+  );
+
+  server.registerTool(
     "add_environment",
     {
       title: "Add environment",
       description: "Add an environment (e.g. staging, production) to a project.",
       inputSchema: {
-        project: z.string().optional(),
-        name: z.string().describe("e.g. 'staging' or 'production'"),
+        project: optionalNonEmptyString(),
+        name: nonEmptyString("e.g. 'staging' or 'production'"),
         kind: z.enum(["development", "staging", "production"]).optional().describe("Inferred from name if omitted"),
       },
     },
@@ -127,7 +158,7 @@ export function registerTools(server: McpServer, store: Store): void {
     {
       title: "List environments",
       description: "List environments for a project.",
-      inputSchema: { project: z.string().optional() },
+      inputSchema: { project: optionalNonEmptyString() },
     },
     guard((a: { project?: string }) => ({ status: "ok", environments: svc.listEnvironments(store, a.project) })),
   );
@@ -143,19 +174,21 @@ export function registerTools(server: McpServer, store: Store): void {
         "{provider:'github',owner:'your-org',repo:'your-repo'}, {provider:'vercel',projectId:'your-vercel-project'}, " +
         "{provider:'supabase',projectRef:'your_project_ref'}, {provider:'stripe',mode:'live'}.",
       inputSchema: {
-        project: z.string().optional(),
-        environment: z.string().describe("Environment id or name"),
+        project: optionalNonEmptyString(),
+        environment: nonEmptyString("Environment id or name"),
         provider,
+        connectionId: optionalNonEmptyString("Optional provider connection id to use for this mapping"),
         resource: z
           .record(z.any())
           .describe("Resource object including a 'provider' field matching `provider`"),
       },
     },
-    guard((a: { project?: string; environment: string; provider: (typeof PROVIDER_IDS)[number]; resource: any }) => {
+    guard((a: { project?: string; environment: string; provider: (typeof PROVIDER_IDS)[number]; connectionId?: string; resource: any }) => {
       const res = svc.mapProviderResource(store, {
         project: a.project,
         environment: a.environment,
         provider: a.provider,
+        connectionId: a.connectionId,
         resource: { provider: a.provider, ...a.resource },
       });
       return { status: "ok", project: res.project.slug, environment: res.environment.name, mappingId: res.mappingId };
@@ -167,7 +200,7 @@ export function registerTools(server: McpServer, store: Store): void {
     {
       title: "List provider mappings",
       description: "List all environment→provider-resource mappings for a project.",
-      inputSchema: { project: z.string().optional() },
+      inputSchema: { project: optionalNonEmptyString() },
     },
     guard((a: { project?: string }) => ({ status: "ok", mappings: svc.listProviderMappings(store, a.project) })),
   );
@@ -177,11 +210,40 @@ export function registerTools(server: McpServer, store: Store): void {
     {
       title: "Get provider mapping",
       description: "Get the concrete provider resource mapped to a given environment.",
-      inputSchema: { project: z.string().optional(), environment: z.string(), provider },
+      inputSchema: { project: optionalNonEmptyString(), environment: nonEmptyString(), provider },
     },
     guard((a: { project?: string; environment: string; provider: (typeof PROVIDER_IDS)[number] }) => ({
       status: "ok",
       mapping: svc.getProviderMapping(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "list_connections",
+    {
+      title: "List provider connections",
+      description: "List configured provider connections. Secrets are never returned; only env var names are shown.",
+      inputSchema: { provider: provider.optional() },
+    },
+    guard((a: { provider?: (typeof PROVIDER_IDS)[number] }) => ({ status: "ok", connections: svc.listConnections(store, a) })),
+  );
+
+  server.registerTool(
+    "create_connection",
+    {
+      title: "Create provider connection",
+      description:
+        "Create an explicit provider connection backed by an environment variable. The secret value is never stored.",
+      inputSchema: {
+        provider,
+        label: nonEmptyString("Friendly connection label"),
+        envVar: nonEmptyString("Environment variable name holding the provider secret"),
+        vercelTeamId: optionalNonEmptyString("Optional Vercel team id for this connection"),
+      },
+    },
+    guard((a: { provider: (typeof PROVIDER_IDS)[number]; label: string; envVar: string; vercelTeamId?: string }) => ({
+      status: "ok",
+      connection: svc.createConnection(store, a),
     })),
   );
 
@@ -196,14 +258,32 @@ export function registerTools(server: McpServer, store: Store): void {
         "allowed, blocked, or requires approval for a provider in an environment — WITHOUT " +
         "executing anything.",
       inputSchema: {
-        project: z.string().optional(),
-        environment: z.string(),
+        project: optionalNonEmptyString(),
+        environment: nonEmptyString(),
         provider,
         capability,
         live: z.boolean().optional().describe("Treat as a live/irreversible action (e.g. Stripe live)"),
       },
     },
     guard((a: any) => ({ status: "ok", decision: svc.checkPolicy(store, a) })),
+  );
+
+  server.registerTool(
+    "simulate_action",
+    {
+      title: "Simulate action",
+      description:
+        "Simulate a provider capability in an environment without executing a provider call or writing audit entries.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        environment: nonEmptyString(),
+        provider,
+        capability,
+        live: z.boolean().optional(),
+        resourceLabel: optionalNonEmptyString(),
+      },
+    },
+    guard((a: any) => ({ status: "ok", decision: svc.simulateAction(store, a) })),
   );
 
   server.registerTool(
@@ -226,11 +306,11 @@ export function registerTools(server: McpServer, store: Store): void {
       inputSchema: {
         effect: z.enum(["allow", "block", "approval_required"]),
         description: z.string().optional(),
-        priority: z.number().optional().describe("Default 100; higher wins"),
+        priority: nonNegativeInt("Default 100; higher wins").optional(),
         match: z
           .object({
-            projectId: z.string().optional(),
-            environmentId: z.string().optional(),
+            projectId: optionalNonEmptyString(),
+            environmentId: optionalNonEmptyString(),
             environmentKind: z.enum(["development", "staging", "production"]).optional(),
             provider: provider.optional(),
             capability: capability.optional(),
@@ -241,6 +321,64 @@ export function registerTools(server: McpServer, store: Store): void {
     guard((a: any) => ({ status: "ok", rule: svc.setPolicyRule(store, a) })),
   );
 
+  server.registerTool(
+    "list_pending_approvals",
+    {
+      title: "List pending approvals",
+      description: "List approval requests created by gated provider actions.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        status: z.enum(["pending", "approved", "rejected", "used"]).optional(),
+      },
+    },
+    guard((a: { project?: string; status?: "pending" | "approved" | "rejected" | "used" }) => ({
+      status: "ok",
+      approvals: svc.listPendingApprovals(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "doctor",
+    {
+      title: "Doctor",
+      description:
+        "Run local readiness checks: project/environment resolution, mappings, credential env vars, and audit writability.",
+      inputSchema: {
+        project: optionalNonEmptyString("Project id or slug; uses selected if omitted"),
+        environment: optionalNonEmptyString("Environment id or name to focus on"),
+      },
+    },
+    guard((a: { project?: string; environment?: string }) => ({ status: "ok", report: svc.doctor(store, a) })),
+  );
+
+  server.registerTool(
+    "approve_action",
+    {
+      title: "Approve action",
+      description:
+        "Approve a pending action request for one matching rerun. This never executes " +
+        "the provider call by itself; rerun the original action after approval.",
+      inputSchema: {
+        approvalId: nonEmptyString("Approval id returned by an approval_required response"),
+        note: optionalNonEmptyString("Optional human review note"),
+      },
+    },
+    guard((a: { approvalId: string; note?: string }) => ({ status: "ok", ...svc.approveAction(store, a) })),
+  );
+
+  server.registerTool(
+    "reject_action",
+    {
+      title: "Reject action",
+      description: "Reject a pending action request so it cannot be approved later.",
+      inputSchema: {
+        approvalId: nonEmptyString("Approval id returned by an approval_required response"),
+        note: optionalNonEmptyString("Optional rejection note"),
+      },
+    },
+    guard((a: { approvalId: string; note?: string }) => ({ status: "ok", ...svc.rejectAction(store, a) })),
+  );
+
   // --- Memory / audit ------------------------------------------------------
 
   server.registerTool(
@@ -248,7 +386,7 @@ export function registerTools(server: McpServer, store: Store): void {
     {
       title: "Read project memory",
       description: "Read short notes saved for a project (optionally scoped to one environment).",
-      inputSchema: { project: z.string().optional(), environment: z.string().optional() },
+      inputSchema: { project: optionalNonEmptyString(), environment: optionalNonEmptyString() },
     },
     guard((a: { project?: string; environment?: string }) => ({
       status: "ok",
@@ -264,10 +402,10 @@ export function registerTools(server: McpServer, store: Store): void {
         "Save a short note for a project/environment so future agent sessions know what happened " +
         "(e.g. 'Last Vercel deploy failed because DATABASE_URL was missing').",
       inputSchema: {
-        project: z.string().optional(),
-        environment: z.string().optional(),
-        note: z.string(),
-        tags: z.array(z.string()).optional(),
+        project: optionalNonEmptyString(),
+        environment: optionalNonEmptyString(),
+        note: nonEmptyString(),
+        tags: z.array(nonEmptyString()).optional(),
       },
     },
     guard((a: { project?: string; environment?: string; note: string; tags?: string[] }) => ({
@@ -282,10 +420,10 @@ export function registerTools(server: McpServer, store: Store): void {
       title: "List audit log",
       description: "List recent audit entries (every provider action is logged here). Filter by project, environment, provider.",
       inputSchema: {
-        project: z.string().optional(),
-        environment: z.string().optional(),
+        project: optionalNonEmptyString(),
+        environment: optionalNonEmptyString(),
         provider: provider.optional(),
-        limit: z.number().optional(),
+        limit: positiveInt().optional(),
       },
     },
     guard((a: { project?: string; environment?: string; provider?: (typeof PROVIDER_IDS)[number]; limit?: number }) => ({
@@ -294,12 +432,40 @@ export function registerTools(server: McpServer, store: Store): void {
     })),
   );
 
+  server.registerTool(
+    "export_audit_log",
+    {
+      title: "Export audit log",
+      description: "Export recent audit entries as jsonl, csv, or markdown.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        environment: optionalNonEmptyString(),
+        provider: provider.optional(),
+        limit: positiveInt().optional(),
+        format: z.enum(["jsonl", "csv", "markdown"]),
+      },
+    },
+    guard(
+      (a: {
+        project?: string;
+        environment?: string;
+        provider?: (typeof PROVIDER_IDS)[number];
+        limit?: number;
+        format: "jsonl" | "csv" | "markdown";
+      }) => ({
+        status: "ok",
+        format: a.format,
+        text: svc.exportAuditLog(store, a),
+      }),
+    ),
+  );
+
   registerProviderTools(server, store);
 }
 
 function registerProviderTools(server: McpServer, store: Store): void {
-  const env = z.string().describe("Environment id or name");
-  const proj = z.string().optional().describe("Project id or slug; uses selected if omitted");
+  const env = nonEmptyString("Environment id or name");
+  const proj = optionalNonEmptyString("Project id or slug; uses selected if omitted");
 
   // --- App logs ----------------------------------------------------------
   // Log reads are allowed by default in every environment (including
@@ -318,9 +484,9 @@ function registerProviderTools(server: McpServer, store: Store): void {
         project: proj,
         environment: env,
         provider: provider.optional().describe("Restrict to one provider (e.g. 'vercel')"),
-        deployment_id: z.string().optional().describe("Specific deployment to read logs for"),
-        since: z.string().optional().describe("Only logs after this time (epoch ms or ISO timestamp)"),
-        limit: z.number().optional().describe("Max log lines (default 100)"),
+        deployment_id: optionalNonEmptyString("Specific deployment to read logs for"),
+        since: optionalNonEmptyString("Only logs after this time (epoch ms or ISO timestamp)"),
+        limit: positiveInt("Max log lines (default 100)").optional(),
       },
     },
     guard((a: any) =>
@@ -346,9 +512,9 @@ function registerProviderTools(server: McpServer, store: Store): void {
       inputSchema: {
         project: proj,
         environment: env,
-        deployment_id: z.string().optional().describe("Deployment to read logs for; defaults to latest"),
-        since: z.string().optional().describe("Only logs after this time (epoch ms or ISO timestamp)"),
-        limit: z.number().optional().describe("Max log lines (default 100)"),
+        deployment_id: optionalNonEmptyString("Deployment to read logs for; defaults to latest"),
+        since: optionalNonEmptyString("Only logs after this time (epoch ms or ISO timestamp)"),
+        limit: positiveInt("Max log lines (default 100)").optional(),
       },
     },
     guard((a: any) =>
@@ -412,6 +578,38 @@ function registerProviderTools(server: McpServer, store: Store): void {
     },
     guard((a: any) => pa.githubListFiles(store, a)),
   );
+  server.registerTool(
+    "list_github_pull_requests",
+    {
+      title: "List GitHub pull requests",
+      description: "List pull requests for the mapped repo.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        state: z.enum(["open", "closed", "all"]).optional(),
+        limit: positiveInt().optional(),
+      },
+    },
+    guard((a: any) => pa.githubPullRequests(store, a)),
+  );
+  server.registerTool(
+    "list_github_branches",
+    {
+      title: "List GitHub branches",
+      description: "List branches for the mapped repo.",
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
+    },
+    guard((a: any) => pa.githubBranches(store, a)),
+  );
+  server.registerTool(
+    "get_github_status_checks",
+    {
+      title: "Get GitHub status checks",
+      description: "Read the combined commit status for a branch, tag, or SHA in the mapped repo.",
+      inputSchema: { project: proj, environment: env, ref: nonEmptyString("Branch, tag, or commit SHA") },
+    },
+    guard((a: any) => pa.githubStatusChecks(store, a)),
+  );
 
   // Vercel
   server.registerTool(
@@ -428,7 +626,7 @@ function registerProviderTools(server: McpServer, store: Store): void {
     {
       title: "Vercel deployments",
       description: "List recent deployments for the mapped Vercel project.",
-      inputSchema: { project: proj, environment: env, limit: z.number().optional() },
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
     },
     guard((a: any) => pa.vercelDeployments(store, a)),
   );
@@ -437,7 +635,7 @@ function registerProviderTools(server: McpServer, store: Store): void {
     {
       title: "Vercel deployment status",
       description: "Get the readyState/status of a specific deployment.",
-      inputSchema: { project: proj, environment: env, deploymentId: z.string() },
+      inputSchema: { project: proj, environment: env, deploymentId: nonEmptyString() },
     },
     guard((a: any) => pa.vercelDeploymentStatus(store, a)),
   );
@@ -446,7 +644,7 @@ function registerProviderTools(server: McpServer, store: Store): void {
     {
       title: "Vercel deployment logs",
       description: "Fetch build/runtime events (logs) for a specific deployment.",
-      inputSchema: { project: proj, environment: env, deploymentId: z.string(), limit: z.number().optional() },
+      inputSchema: { project: proj, environment: env, deploymentId: nonEmptyString(), limit: positiveInt().optional() },
     },
     guard((a: any) => pa.vercelDeploymentLogs(store, a)),
   );
@@ -460,9 +658,9 @@ function registerProviderTools(server: McpServer, store: Store): void {
       inputSchema: {
         project: proj,
         environment: env,
-        key: z.string(),
+        key: nonEmptyString(),
         value: z.string(),
-        target: z.array(z.string()).optional().describe("e.g. ['production'] or ['preview']"),
+        target: z.array(nonEmptyString()).optional().describe("e.g. ['production'] or ['preview']"),
       },
     },
     guard((a: any) => pa.vercelSetEnvVar(store, a)),
@@ -475,8 +673,16 @@ function registerProviderTools(server: McpServer, store: Store): void {
       inputSchema: {
         project: proj,
         environment: env,
-        name: z.string().optional(),
-        deploymentId: z.string().optional().describe("Redeploy from an existing deployment id"),
+        name: optionalNonEmptyString(),
+        deploymentId: optionalNonEmptyString("Redeploy from an existing deployment id"),
+        gitSource: z
+          .object({
+            type: z.literal("github"),
+            repoId: nonEmptyString("GitHub repo id"),
+            ref: optionalNonEmptyString("Git ref"),
+            sha: optionalNonEmptyString("Commit SHA"),
+          })
+          .optional(),
       },
     },
     guard((a: any) => pa.vercelCreateDeployment(store, a)),
@@ -493,11 +699,20 @@ function registerProviderTools(server: McpServer, store: Store): void {
     guard((a: any) => pa.railwayProjectContext(store, a)),
   );
   server.registerTool(
+    "discover_railway_resources",
+    {
+      title: "Discover Railway resources",
+      description: "List Railway projects with their environment and service ids so they can be mapped.",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.railwayDiscover(store, a)),
+  );
+  server.registerTool(
     "get_railway_deployments",
     {
       title: "Railway deployments",
       description: "List recent deployments for the mapped Railway project (scoped to its environment/service if mapped).",
-      inputSchema: { project: proj, environment: env, limit: z.number().optional() },
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
     },
     guard((a: any) => pa.railwayDeployments(store, a)),
   );
@@ -512,9 +727,9 @@ function registerProviderTools(server: McpServer, store: Store): void {
       inputSchema: {
         project: proj,
         environment: env,
-        deployment_id: z.string().optional().describe("Deployment to read logs for; defaults to latest"),
-        since: z.string().optional().describe("Only logs after this time (ISO timestamp)"),
-        limit: z.number().optional().describe("Max log lines (default 100)"),
+        deployment_id: optionalNonEmptyString("Deployment to read logs for; defaults to latest"),
+        since: optionalNonEmptyString("Only logs after this time (ISO timestamp)"),
+        limit: positiveInt("Max log lines (default 100)").optional(),
       },
     },
     guard((a: any) =>
@@ -537,7 +752,7 @@ function registerProviderTools(server: McpServer, store: Store): void {
       inputSchema: {
         project: proj,
         environment: env,
-        deployment_id: z.string().optional().describe("Redeploy this existing deployment instead of triggering a fresh one"),
+        deployment_id: optionalNonEmptyString("Redeploy this existing deployment instead of triggering a fresh one"),
       },
     },
     guard((a: any) =>
@@ -558,9 +773,9 @@ function registerProviderTools(server: McpServer, store: Store): void {
       inputSchema: {
         project: proj,
         environment: env,
-        key: z.string(),
+        key: nonEmptyString(),
         value: z.string(),
-        service_id: z.string().optional().describe("Override the mapped serviceId (omit for a shared variable)"),
+        service_id: optionalNonEmptyString("Override the mapped serviceId (omit for a shared variable)"),
         skip_deploys: z.boolean().optional().describe("Don't trigger a redeploy after the change"),
       },
     },
@@ -603,9 +818,34 @@ function registerProviderTools(server: McpServer, store: Store): void {
         "Run SQL against the mapped Supabase project. Reads run with read_only=true. Destructive SQL " +
         "(DROP/TRUNCATE/DELETE/ALTER…) is blocked everywhere by default; non-read writes in production " +
         "require approval.",
-      inputSchema: { project: proj, environment: env, sql: z.string() },
+      inputSchema: { project: proj, environment: env, sql: nonEmptyString() },
     },
     guard((a: any) => pa.supabaseQuery(store, a)),
+  );
+  server.registerTool(
+    "get_supabase_logs",
+    {
+      title: "Get Supabase logs",
+      description: "Read project logs from the mapped Supabase project. Availability depends on Supabase plan/API limits.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        service: optionalNonEmptyString("Optional service/log source"),
+        since: optionalNonEmptyString("Optional timestamp filter"),
+        limit: positiveInt().optional(),
+      },
+    },
+    guard((a: any) => pa.supabaseLogs(store, a)),
+  );
+  server.registerTool(
+    "apply_supabase_migration",
+    {
+      title: "Apply Supabase migration",
+      description:
+        "Apply SQL through the Supabase migrations endpoint. Production writes require approval and endpoint access may be restricted by Supabase.",
+      inputSchema: { project: proj, environment: env, name: nonEmptyString(), sql: nonEmptyString() },
+    },
+    guard((a: any) => pa.supabaseApplyMigration(store, a)),
   );
 
   // Stripe
@@ -614,9 +854,41 @@ function registerProviderTools(server: McpServer, store: Store): void {
     {
       title: "List Stripe products",
       description: "List products in the environment's Stripe mode (test/live).",
-      inputSchema: { project: proj, environment: env, limit: z.number().optional() },
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
     },
     guard((a: any) => pa.stripeListProducts(store, a)),
+  );
+  server.registerTool(
+    "list_stripe_customers",
+    {
+      title: "List Stripe customers",
+      description: "List customers in the environment's Stripe mode (test/live).",
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
+    },
+    guard((a: any) => pa.stripeListCustomers(store, a)),
+  );
+  server.registerTool(
+    "list_stripe_subscriptions",
+    {
+      title: "List Stripe subscriptions",
+      description: "List subscriptions in the environment's Stripe mode (test/live).",
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional(), status: optionalNonEmptyString() },
+    },
+    guard((a: any) => pa.stripeListSubscriptions(store, a)),
+  );
+  server.registerTool(
+    "list_stripe_invoices",
+    {
+      title: "List Stripe invoices",
+      description: "List invoices in the environment's Stripe mode (test/live).",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        limit: positiveInt().optional(),
+        customer: optionalNonEmptyString("Optional Stripe customer id"),
+      },
+    },
+    guard((a: any) => pa.stripeListInvoices(store, a)),
   );
   server.registerTool(
     "create_stripe_product",
@@ -624,7 +896,7 @@ function registerProviderTools(server: McpServer, store: Store): void {
       title: "Create Stripe product",
       description:
         "Create a product. Test-mode writes are allowed by default; LIVE-mode writes require approval.",
-      inputSchema: { project: proj, environment: env, name: z.string(), description: z.string().optional() },
+      inputSchema: { project: proj, environment: env, name: nonEmptyString(), description: z.string().optional() },
     },
     guard((a: any) => pa.stripeCreateProduct(store, a)),
   );
@@ -637,9 +909,9 @@ function registerProviderTools(server: McpServer, store: Store): void {
       inputSchema: {
         project: proj,
         environment: env,
-        product: z.string().describe("Stripe product id"),
-        currency: z.string().describe("ISO currency, e.g. 'usd'"),
-        unitAmount: z.number().describe("Amount in the smallest currency unit, e.g. cents"),
+        product: nonEmptyString("Stripe product id"),
+        currency: nonEmptyString("ISO currency, e.g. 'usd'"),
+        unitAmount: positiveInt("Amount in the smallest currency unit, e.g. cents"),
         recurringInterval: z.enum(["day", "week", "month", "year"]).optional(),
       },
     },

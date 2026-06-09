@@ -10,6 +10,9 @@
   },
   "files": [
     "dist",
+    "docs",
+    ".offlocal/config.example.yaml",
+    ".env.example",
     "README.md",
     "LICENSE"
   ],
@@ -29,7 +32,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build"
+    "verify": "npm run typecheck && npm run build && npm test && npm audit",
+    "prepublishOnly": "npm run verify"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -40,9 +44,12 @@
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=18"
+  },
+  "overrides": {
+    "vite": "6.4.2"
   }
 }

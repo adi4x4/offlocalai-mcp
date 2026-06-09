@@ -1,4 +1,5 @@
 import { httpJson } from "./http.js";
+import { arrayShape, booleanField, objectShape, optionalStringField, stringField } from "./shape.js";
 
 /**
  * GitHub REST adapter (read-only surface for V0).
@@ -37,16 +38,17 @@ export async function getRepoContext(
   const data = await httpJson<Record<string, any>>(`${BASE}/repos/${owner}/${repo}`, {
     headers: headers(token),
   });
+  const repoData = objectShape(data, "GitHub repo");
   return {
-    fullName: data.full_name,
-    description: data.description ?? null,
-    defaultBranch: data.default_branch,
-    private: data.private,
-    pushedAt: data.pushed_at,
-    language: data.language ?? null,
-    openIssues: data.open_issues_count ?? 0,
-    topics: data.topics,
-    htmlUrl: data.html_url,
+    fullName: stringField(repoData, "full_name", "GitHub repo"),
+    description: optionalStringField(repoData, "description") ?? null,
+    defaultBranch: stringField(repoData, "default_branch", "GitHub repo"),
+    private: booleanField(repoData, "private", "GitHub repo"),
+    pushedAt: stringField(repoData, "pushed_at", "GitHub repo"),
+    language: optionalStringField(repoData, "language") ?? null,
+    openIssues: typeof repoData.open_issues_count === "number" ? repoData.open_issues_count : 0,
+    topics: Array.isArray(repoData.topics) ? repoData.topics : undefined,
+    htmlUrl: stringField(repoData, "html_url", "GitHub repo"),
   };
 }
 
@@ -58,11 +60,12 @@ export async function getReadme(
   const data = await httpJson<Record<string, any>>(`${BASE}/repos/${owner}/${repo}/readme`, {
     headers: headers(token),
   });
+  const readme = objectShape(data, "GitHub README");
   const decoded =
-    data.encoding === "base64"
-      ? Buffer.from(data.content, "base64").toString("utf8")
-      : String(data.content ?? "");
-  return { path: data.path, content: decoded };
+    readme.encoding === "base64"
+      ? Buffer.from(stringField(readme, "content", "GitHub README"), "base64").toString("utf8")
+      : String(readme.content ?? "");
+  return { path: stringField(readme, "path", "GitHub README"), content: decoded };
 }
 
 export interface GithubFileEntry {
@@ -82,11 +85,114 @@ export async function listFiles(
     `${BASE}/repos/${owner}/${repo}/contents/${encodeURIComponent(path).replace(/%2F/g, "/")}`,
     { headers: headers(token) },
   );
-  const arr = Array.isArray(data) ? data : [data];
-  return arr.map((e: Record<string, any>) => ({
-    name: e.name,
-    path: e.path,
-    type: e.type,
-    size: e.size ?? 0,
-  }));
+  const arr = Array.isArray(data) ? arrayShape(data, "GitHub contents") : [objectShape(data, "GitHub content")];
+  return arr.map((entry: unknown) => {
+    const e = objectShape(entry, "GitHub content");
+    return {
+      name: stringField(e, "name", "GitHub content"),
+      path: stringField(e, "path", "GitHub content"),
+      type: stringField(e, "type", "GitHub content"),
+      size: typeof e.size === "number" ? e.size : 0,
+    };
+  });
+}
+
+export interface GithubPullRequest {
+  number: number;
+  title: string;
+  state: string;
+  draft: boolean;
+  headRef: string;
+  baseRef: string;
+  htmlUrl: string;
+  updatedAt: string;
+}
+
+export async function listPullRequests(
+  token: string,
+  owner: string,
+  repo: string,
+  opts: { state?: "open" | "closed" | "all"; limit?: number } = {},
+): Promise<GithubPullRequest[]> {
+  const data = await httpJson<any>(`${BASE}/repos/${owner}/${repo}/pulls`, {
+    headers: headers(token),
+    query: { state: opts.state ?? "open", per_page: String(opts.limit ?? 10) },
+  });
+  return arrayShape(data, "GitHub pull requests").map((entry) => {
+    const pr = objectShape(entry, "GitHub pull request");
+    const head = objectShape(pr.head, "GitHub pull request head");
+    const base = objectShape(pr.base, "GitHub pull request base");
+    return {
+      number: typeof pr.number === "number" ? pr.number : 0,
+      title: stringField(pr, "title", "GitHub pull request"),
+      state: stringField(pr, "state", "GitHub pull request"),
+      draft: typeof pr.draft === "boolean" ? pr.draft : false,
+      headRef: stringField(head, "ref", "GitHub pull request head"),
+      baseRef: stringField(base, "ref", "GitHub pull request base"),
+      htmlUrl: stringField(pr, "html_url", "GitHub pull request"),
+      updatedAt: stringField(pr, "updated_at", "GitHub pull request"),
+    };
+  });
+}
+
+export interface GithubBranch {
+  name: string;
+  protected: boolean;
+  sha?: string;
+}
+
+export async function listBranches(
+  token: string,
+  owner: string,
+  repo: string,
+  limit = 30,
+): Promise<GithubBranch[]> {
+  const data = await httpJson<any>(`${BASE}/repos/${owner}/${repo}/branches`, {
+    headers: headers(token),
+    query: { per_page: String(limit) },
+  });
+  return arrayShape(data, "GitHub branches").map((entry) => {
+    const branch = objectShape(entry, "GitHub branch");
+    const commit = typeof branch.commit === "object" && branch.commit !== null ? objectShape(branch.commit, "GitHub branch commit") : {};
+    return {
+      name: stringField(branch, "name", "GitHub branch"),
+      protected: typeof branch.protected === "boolean" ? branch.protected : false,
+      sha: optionalStringField(commit, "sha"),
+    };
+  });
+}
+
+export interface GithubCombinedStatus {
+  state: string;
+  totalCount: number;
+  statuses: Array<{ context: string; state: string; targetUrl?: string; description?: string }>;
+  sha?: string;
+}
+
+export async function getCombinedStatus(
+  token: string,
+  owner: string,
+  repo: string,
+  ref: string,
+): Promise<GithubCombinedStatus> {
+  const data = await httpJson<any>(`${BASE}/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}/status`, {
+    headers: headers(token),
+  });
+  const status = objectShape(data, "GitHub combined status");
+  return {
+    state: stringField(status, "state", "GitHub combined status"),
+    totalCount: typeof status.total_count === "number" ? status.total_count : 0,
+    sha: optionalStringField(status, "sha"),
+    statuses: Array.isArray(status.statuses)
+      ? status.statuses.map((entry: unknown) => {
+          const s = objectShape(entry, "GitHub status");
+          return {
+            context: stringField(s, "context", "GitHub status"),
+            state: stringField(s, "state", "GitHub status"),
+            targetUrl: optionalStringField(s, "target_url"),
+            description: optionalStringField(s, "description"),
+          };
+        })
+      : [],
+  };
 }

@@ -16,8 +16,10 @@ projects:
       staging:
         github:
           repo: your-org/your-repo
+          # Optional: connection_id: conn_github_team_a
         vercel:
           project: your-staging-vercel-project   # id or name
+          # Optional: connection_id: conn_vercel_team_a
         supabase:
           project_ref: your_staging_project_ref
         stripe:

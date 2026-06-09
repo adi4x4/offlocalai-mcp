@@ -1,4 +1,5 @@
 import type { Store } from "./storage.js";
+import { runGuarded } from "./actions.js";
 import { evaluatePolicy } from "./policy.js";
 import { findConnection, findMapping } from "./resolve.js";
 import { resolveToken } from "./providers/auth.js";
@@ -23,11 +24,9 @@ import type {
  * reason from directly.
  *
  * Note on the embedded live Vercel snapshot: it is a best-effort, read-only
- * convenience read. It is NOT individually written to the audit log (it would
- * make building context noisy/recursive). Explicit provider tool calls
- * (get_vercel_deployments, etc.) ARE audited and go through the full guarded
- * flow. The context read degrades gracefully to mappings-only when no token is
- * configured or the API errors.
+ * convenience read, but it still goes through runGuarded so policy/audit
+ * invariants hold before any provider API is called. It degrades gracefully to
+ * mappings-only when audit reservation, credentials, or the API fail.
  */
 
 function effectWord(effect: PolicyEffect): "allowed" | "blocked" | "approval-required" {
@@ -109,41 +108,65 @@ interface VercelSnapshot {
 
 async function fetchVercelSnapshot(
   store: Store,
+  project: Project,
+  environment: Environment,
   projectId: string,
+  connectionId?: string,
   teamId?: string,
 ): Promise<VercelSnapshot> {
-  try {
-    const conn = findConnection(store, "vercel");
-    const token = conn
-      ? resolveToken(conn)
-      : process.env.VERCEL_TOKEN;
-    if (!token) {
-      return { vercelProject: projectId, latest: null, liveDataError: "VERCEL_TOKEN not set — live status unavailable." };
-    }
-    const deps = await vc.listDeployments(token, projectId, teamId, 3);
-    if (deps.length === 0) return { vercelProject: projectId, latest: null };
-    const first = deps[0]!;
-    const latest: VercelSnapshot["latest"] = {
-      state: first.readyState ?? first.state,
-      url: first.url ? `https://${first.url}` : undefined,
-      createdAt: first.createdAt,
-    };
-    if (/error/i.test(latest.state)) {
-      try {
-        const status = await vc.getDeploymentStatus(token, first.uid, teamId);
-        if (typeof status.errorMessage === "string") latest.errorMessage = status.errorMessage;
-      } catch {
-        /* best-effort */
+  const result = await runGuarded(
+    store,
+    {
+      project,
+      environment,
+      provider: "vercel",
+      capability: "read",
+      tool: "get_project_context",
+      summary: `read live Vercel deployment snapshot for ${projectId}`,
+      resourceLabel: projectId,
+    },
+    async () => {
+      const conn = findConnection(store, "vercel", connectionId);
+      if (connectionId && !conn) {
+        throw new Error(`Mapping references missing vercel connection "${connectionId}".`);
       }
-    }
-    return { vercelProject: projectId, latest };
-  } catch (err) {
-    return {
-      vercelProject: projectId,
-      latest: null,
-      liveDataError: err instanceof Error ? err.message : String(err),
-    };
+      const token = conn
+        ? resolveToken(conn)
+        : process.env.VERCEL_TOKEN;
+      if (!token) {
+        throw new Error("VERCEL_TOKEN not set — live status unavailable.");
+      }
+      const deps = await vc.listDeployments(token, projectId, teamId, 3);
+      if (deps.length === 0) return { vercelProject: projectId, latest: null };
+      const first = deps[0]!;
+      const latest: VercelSnapshot["latest"] = {
+        state: first.readyState ?? first.state,
+        url: first.url ? `https://${first.url}` : undefined,
+        createdAt: first.createdAt,
+      };
+      if (/error/i.test(latest.state)) {
+        try {
+          const status = await vc.getDeploymentStatus(token, first.uid, teamId);
+          if (typeof status.errorMessage === "string") latest.errorMessage = status.errorMessage;
+        } catch {
+          /* best-effort */
+        }
+      }
+      return { vercelProject: projectId, latest };
+    },
+  );
+
+  if (result.status === "ok") {
+    return result.data as VercelSnapshot;
   }
+  if (result.status === "error") {
+    return { vercelProject: projectId, latest: null, liveDataError: result.error };
+  }
+  return {
+    vercelProject: projectId,
+    latest: null,
+    liveDataError: `${result.status}: ${result.reason}`,
+  };
 }
 
 export interface EnvironmentContext {
@@ -213,9 +236,9 @@ async function buildEnvironmentContext(
   if (vercelMap && vercelMap.resource.provider === "vercel") {
     const teamId =
       vercelMap.resource.teamId ??
-      findConnection(store, "vercel")?.scope?.vercelTeamId ??
+      findConnection(store, "vercel", vercelMap.connectionId)?.scope?.vercelTeamId ??
       process.env.VERCEL_TEAM_ID;
-    vercelSnapshot = await fetchVercelSnapshot(store, vercelMap.resource.projectId, teamId);
+    vercelSnapshot = await fetchVercelSnapshot(store, project, env, vercelMap.resource.projectId, vercelMap.connectionId, teamId);
   }
 
   const buckets = classifyActions(store, project, env, stripeMode);

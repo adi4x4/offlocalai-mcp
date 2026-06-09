@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Store } from "./storage.js";
 import { ensureDefaultWorkspace } from "./service.js";
 import { registerTools } from "./tools/index.js";
+import { logEvent } from "./logger.js";
 
 /**
  * offlocalai-mcp — local stdio MCP server.
@@ -24,10 +25,10 @@ async function main(): Promise<void> {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error(`[offlocalai-mcp] ready — state at ${store.paths.home}`);
+  logEvent("info", "server.ready", { name: "offlocalai-mcp", stateHome: store.paths.home });
 }
 
 main().catch((err) => {
-  console.error("[offlocalai-mcp] fatal:", err);
+  logEvent("error", "server.fatal", { error: err instanceof Error ? err.message : String(err) });
   process.exit(1);
 });

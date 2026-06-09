@@ -46,6 +46,80 @@ export async function listProducts(key: string, limit = 10): Promise<StripeProdu
   }));
 }
 
+export interface StripeCustomer {
+  id: string;
+  email: string | null;
+  name: string | null;
+  created: number;
+}
+
+export async function listCustomers(key: string, limit = 10): Promise<StripeCustomer[]> {
+  const data = await httpJson<{ data?: any[] }>(`${BASE}/customers`, {
+    headers: headers(key),
+    query: { limit: String(limit) },
+  });
+  return (data.data ?? []).map((c: Record<string, any>) => ({
+    id: c.id,
+    email: c.email ?? null,
+    name: c.name ?? null,
+    created: c.created,
+  }));
+}
+
+export interface StripeSubscription {
+  id: string;
+  customer: string;
+  status: string;
+  currentPeriodEnd?: number;
+  created: number;
+}
+
+export async function listSubscriptions(
+  key: string,
+  params: { limit?: number; status?: string } = {},
+): Promise<StripeSubscription[]> {
+  const data = await httpJson<{ data?: any[] }>(`${BASE}/subscriptions`, {
+    headers: headers(key),
+    query: { limit: String(params.limit ?? 10), status: params.status },
+  });
+  return (data.data ?? []).map((s: Record<string, any>) => ({
+    id: s.id,
+    customer: typeof s.customer === "string" ? s.customer : s.customer?.id,
+    status: s.status,
+    currentPeriodEnd: s.current_period_end,
+    created: s.created,
+  }));
+}
+
+export interface StripeInvoice {
+  id: string;
+  customer: string | null;
+  status: string | null;
+  amountDue: number;
+  currency: string;
+  hostedInvoiceUrl?: string;
+  created: number;
+}
+
+export async function listInvoices(
+  key: string,
+  params: { limit?: number; customer?: string } = {},
+): Promise<StripeInvoice[]> {
+  const data = await httpJson<{ data?: any[] }>(`${BASE}/invoices`, {
+    headers: headers(key),
+    query: { limit: String(params.limit ?? 10), customer: params.customer },
+  });
+  return (data.data ?? []).map((i: Record<string, any>) => ({
+    id: i.id,
+    customer: typeof i.customer === "string" ? i.customer : i.customer?.id ?? null,
+    status: i.status ?? null,
+    amountDue: i.amount_due ?? 0,
+    currency: i.currency,
+    hostedInvoiceUrl: i.hosted_invoice_url,
+    created: i.created,
+  }));
+}
+
 export interface StripePrice {
   id: string;
   product: string;

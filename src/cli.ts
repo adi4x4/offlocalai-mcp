@@ -2,17 +2,24 @@
 import { Store } from "./storage.js";
 import {
   addEnvironment,
+  createConnection,
   createProject,
+  doctor,
   ensureDefaultWorkspace,
+  exportAuditLog,
+  exportContextSnapshot,
   getProjectContext,
+  listConnections,
   listEnvironments,
   listProjects,
   mapProviderResource,
   selectProject,
+  simulateAction,
 } from "./service.js";
 import { seedFromConfigFile } from "./config.js";
 import type { ProviderId, ProviderResource } from "./types.js";
 import { resolve } from "node:path";
+import { logEvent, startupLoggingEnabled } from "./logger.js";
 
 /**
  * Minimal `offlocal` CLI. The MCP tools are the primary interface; this CLI is a
@@ -43,6 +50,20 @@ function parseFlags(args: string[]): { positional: string[]; flags: Record<strin
 
 function print(obj: unknown): void {
   console.log(JSON.stringify(obj, null, 2));
+}
+
+function failCli(error: string): void {
+  print({ status: "error", error });
+  process.exitCode = 1;
+}
+
+function optionalPositiveInt(raw: string | undefined, label: string): number | undefined {
+  if (raw === undefined) return undefined;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return parsed;
 }
 
 const REQUIRED_ENV_VARS = [
@@ -116,7 +137,13 @@ Usage:
   offlocal select <project>                Set the active project
   offlocal env add <name> [--project <p>] [--kind development|staging|production]
   offlocal env list [--project <p>]
-  offlocal map <provider> <environment> --resource '<json>' [--project <p>]
+  offlocal connection create <provider> --label <name> --env-var <VAR> [--vercel-team-id <id>]
+  offlocal connection list [--provider <provider>]
+  offlocal map <provider> <environment> --resource '<json>' [--project <p>] [--connection <id>]
+  offlocal doctor [--project <p>] [--env <e>] [--json]
+  offlocal simulate <provider> <environment> <capability> [--project <p>] [--live] [--resource <label>]
+  offlocal audit export [--project <p>] [--env <e>] [--provider <p>] [--limit <n>] [--format jsonl|csv|markdown]
+  offlocal snapshot [--project <p>] [--env <e>] [--format json|markdown]
   offlocal context [project] [--env <e>] [--json]   Print the production-context summary
 
 Providers: github | vercel | supabase | stripe | railway
@@ -135,16 +162,19 @@ async function main(): Promise<void> {
     return;
   }
 
-  const store = new Store();
-  ensureDefaultWorkspace(store);
   const cmd = argv[0];
   // Parse flags from ALL args after the command, so flags work whether or not a
   // subcommand is present (e.g. `init --config x`). Subcommands are positional[0].
   const { positional, flags } = parseFlags(argv.slice(1));
   const sub = positional[0];
+  if (startupLoggingEnabled()) {
+    logEvent("info", "cli.start", { command: cmd, subcommand: sub, cwd: process.cwd() });
+  }
 
   switch (cmd) {
     case "init": {
+      const store = new Store();
+      ensureDefaultWorkspace(store);
       const serverEntry = resolve(process.cwd(), "dist", "index.js");
       const path = flags.config ?? store.paths.config;
       const result = seedFromConfigFile(store, path);
@@ -164,18 +194,21 @@ async function main(): Promise<void> {
     case "project": {
       if (sub === "create") {
         const name = positional[1];
-        if (!name) return print({ status: "error", error: "Usage: offlocal project create <name>" });
+        if (!name) return failCli("Usage: offlocal project create <name>");
+        const store = new Store();
         print({ status: "ok", project: createProject(store, { name, slug: flags.slug, description: flags.desc }) });
       } else if (sub === "list") {
+        const store = new Store();
         print({ status: "ok", projects: listProjects(store) });
       } else {
-        print({ status: "error", error: "Unknown project subcommand. Try: create | list" });
+        failCli("Unknown project subcommand. Try: create | list");
       }
       return;
     }
 
     case "select": {
-      if (!sub) return print({ status: "error", error: "Usage: offlocal select <project>" });
+      if (!sub) return failCli("Usage: offlocal select <project>");
+      const store = new Store();
       print({ status: "ok", project: selectProject(store, sub) });
       return;
     }
@@ -183,7 +216,8 @@ async function main(): Promise<void> {
     case "env": {
       if (sub === "add") {
         const name = positional[1];
-        if (!name) return print({ status: "error", error: "Usage: offlocal env add <name>" });
+        if (!name) return failCli("Usage: offlocal env add <name>");
+        const store = new Store();
         print({
           status: "ok",
           environment: addEnvironment(store, {
@@ -193,9 +227,35 @@ async function main(): Promise<void> {
           }),
         });
       } else if (sub === "list") {
+        const store = new Store();
         print({ status: "ok", environments: listEnvironments(store, flags.project) });
       } else {
-        print({ status: "error", error: "Unknown env subcommand. Try: add | list" });
+        failCli("Unknown env subcommand. Try: add | list");
+      }
+      return;
+    }
+
+    case "connection": {
+      if (sub === "create") {
+        const provider = positional[1] as ProviderId | undefined;
+        if (!provider || !flags.label || !flags["env-var"]) {
+          return failCli("Usage: offlocal connection create <provider> --label <name> --env-var <VAR>");
+        }
+        const store = new Store();
+        print({
+          status: "ok",
+          connection: createConnection(store, {
+            provider,
+            label: flags.label,
+            envVar: flags["env-var"],
+            vercelTeamId: flags["vercel-team-id"],
+          }),
+        });
+      } else if (sub === "list") {
+        const store = new Store();
+        print({ status: "ok", connections: listConnections(store, { provider: flags.provider as ProviderId | undefined }) });
+      } else {
+        failCli("Unknown connection subcommand. Try: create | list");
       }
       return;
     }
@@ -204,21 +264,90 @@ async function main(): Promise<void> {
       const provider = sub as ProviderId;
       const environment = positional[1];
       if (!provider || !environment || !flags.resource) {
-        return print({ status: "error", error: "Usage: offlocal map <provider> <environment> --resource '<json>'" });
+        return failCli("Usage: offlocal map <provider> <environment> --resource '<json>' [--connection <id>]");
       }
       let parsed: Record<string, unknown>;
       try {
         parsed = JSON.parse(flags.resource);
       } catch {
-        return print({ status: "error", error: "--resource must be valid JSON" });
+        return failCli("--resource must be valid JSON");
       }
+      const store = new Store();
       const resource = { provider, ...parsed } as ProviderResource;
-      const res = mapProviderResource(store, { project: flags.project, environment, provider, resource });
+      const res = mapProviderResource(store, {
+        project: flags.project,
+        environment,
+        provider,
+        connectionId: flags.connection,
+        resource,
+      });
       print({ status: "ok", project: res.project.slug, environment: res.environment.name, mappingId: res.mappingId });
       return;
     }
 
+    case "doctor": {
+      const store = new Store();
+      const report = doctor(store, { project: flags.project, environment: flags.env });
+      if (flags.json === "true") {
+        print({ status: "ok", report });
+      } else {
+        console.log(`${report.status.toUpperCase()} ${report.summary.pass}/${report.summary.total} checks passed`);
+        for (const check of report.checks) {
+          console.log(`${check.status.toUpperCase()} ${check.id}: ${check.message}`);
+        }
+      }
+      return;
+    }
+
+    case "simulate": {
+      const provider = sub as ProviderId | undefined;
+      const environment = positional[1];
+      const capability = positional[2] as any;
+      if (!provider || !environment || !capability) {
+        return failCli("Usage: offlocal simulate <provider> <environment> <capability> [--project <p>] [--live]");
+      }
+      const store = new Store();
+      print({
+        status: "ok",
+        decision: simulateAction(store, {
+          project: flags.project,
+          environment,
+          provider,
+          capability,
+          live: flags.live === "true",
+          resourceLabel: flags.resource,
+        }),
+      });
+      return;
+    }
+
+    case "audit": {
+      if (sub !== "export") {
+        return failCli("Unknown audit subcommand. Try: export");
+      }
+      const format = (flags.format ?? "jsonl") as "jsonl" | "csv" | "markdown";
+      const store = new Store();
+      console.log(
+        exportAuditLog(store, {
+          project: flags.project,
+          environment: flags.env,
+          provider: flags.provider as ProviderId | undefined,
+          limit: optionalPositiveInt(flags.limit, "--limit"),
+          format,
+        }),
+      );
+      return;
+    }
+
+    case "snapshot": {
+      const format = (flags.format ?? "json") as "json" | "markdown";
+      const store = new Store();
+      console.log(await exportContextSnapshot(store, { project: flags.project, environment: flags.env, format }));
+      return;
+    }
+
     case "context": {
+      const store = new Store();
       const context = await getProjectContext(store, sub, flags.env);
       if (flags.json === "true") {
         print({ status: "ok", context });
@@ -230,7 +359,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      console.log(HELP);
+      failCli(`Unknown command "${cmd}". Try: offlocal --help`);
   }
 }
 

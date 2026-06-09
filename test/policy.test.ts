@@ -67,6 +67,40 @@ describe("explicit policy rules override defaults", () => {
     const d = checkPolicy(store, { project: "acme-crm", environment: "staging", provider: "vercel", capability: "deploy" });
     expect(d.effect).toBe("block");
   });
+
+  it("rejects invalid runtime rule values before storing them", () => {
+    const store = freshStore();
+    seedAcme(store);
+    const rulesBefore = store.data.policyRules.length;
+
+    expect(() => setPolicyRule(store, { effect: "permit" as any, match: { provider: "vercel" } })).toThrow(/policy effect/i);
+    expect(() => setPolicyRule(store, { effect: "allow", match: { provider: "unknown" as any } })).toThrow(/provider/i);
+    expect(() => setPolicyRule(store, { effect: "allow", match: { capability: "restart" as any } })).toThrow(/capability/i);
+
+    expect(store.data.policyRules).toHaveLength(rulesBefore);
+  });
+
+  it("rejects invalid runtime check values before evaluating policy", () => {
+    const store = freshStore();
+    seedAcme(store);
+
+    expect(() =>
+      checkPolicy(store, {
+        project: "acme-crm",
+        environment: "staging",
+        provider: "unknown" as any,
+        capability: "read",
+      }),
+    ).toThrow(/provider/i);
+    expect(() =>
+      checkPolicy(store, {
+        project: "acme-crm",
+        environment: "staging",
+        provider: "vercel",
+        capability: "restart" as any,
+      }),
+    ).toThrow(/capability/i);
+  });
 });
 
 describe("SQL classification", () => {

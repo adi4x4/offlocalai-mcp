@@ -123,6 +123,13 @@ env = { GITHUB_TOKEN = "ghp_your_token", VERCEL_TOKEN = "your_vercel_token" }
 | `STRIPE_TEST_SECRET_KEY` | Stripe | `sk_test_...` |
 | `STRIPE_LIVE_SECRET_KEY` | Stripe | `sk_live_...` — only used when policy allows a live write |
 | `RAILWAY_TOKEN` | Railway | Account/workspace token |
+| `OFFLOCAL_HTTP_TIMEOUT_MS` | Runtime | Optional provider API timeout in milliseconds; defaults to `30000` |
+| `OFFLOCAL_HTTP_RETRIES` | Runtime | Optional retry count for idempotent provider reads; defaults to `2` |
+| `OFFLOCAL_HTTP_RETRY_BASE_MS` | Runtime | Optional linear retry delay base in milliseconds; defaults to `25` |
+| `OFFLOCAL_LOCK_STALE_MS` | Runtime | Optional stale local file-lock threshold in milliseconds; defaults to `30000` |
+| `OFFLOCAL_MEMORY_MAX_ENTRIES` | Runtime | Optional cap for retained local memory entries |
+| `OFFLOCAL_AUDIT_MAX_ENTRIES` | Runtime | Optional cap for retained audit log entries |
+| `OFFLOCAL_LOG_STARTUP` | Runtime | Set to `true` to emit structured CLI startup logs to stderr |
 
 ### Step 3 — Let the agent set up your project (no YAML)
 
@@ -146,6 +153,10 @@ Behind the scenes the agent uses `create_project`, `add_environment`,
 gated by policy and written to the audit log. Your setup persists in a local
 `.offlocal/` directory (in the agent's working directory; override with the
 `OFFLOCAL_HOME` env var), so you only do Step 3 once per machine.
+Advanced setups can pass `connectionId` to `map_provider_resource` when a
+resource must use a specific provider connection; the id is validated before the
+mapping is stored and shown again by `list_provider_mappings` /
+`get_provider_mapping`.
 
 That's the whole setup. **You never have to write a config file.**
 
@@ -178,18 +189,21 @@ See [offlocal.ai](https://offlocal.ai).
 ## MCP tools
 
 **Project / workspace:** `list_projects`, `create_project`, `select_project`,
-`get_project_context`, `add_environment`, `list_environments`
+`get_project_context`, `export_context`, `doctor`, `add_environment`,
+`list_environments`
 
 **Provider mappings:** `map_provider_resource`, `list_provider_mappings`,
-`get_provider_mapping`
+`get_provider_mapping`, `list_connections`, `create_connection`
 
-**Policy:** `check_policy`, `list_policy_rules`, `set_policy_rule`
+**Policy / approval:** `check_policy`, `list_policy_rules`, `set_policy_rule`,
+`simulate_action`, `list_pending_approvals`, `approve_action`, `reject_action`
 
 **Memory / audit:** `read_project_memory`, `write_project_memory`,
-`list_audit_log`
+`list_audit_log`, `export_audit_log`
 
 **GitHub:** `get_github_repo_context`, `get_github_repo_readme`,
-`list_github_repo_files`
+`list_github_repo_files`, `list_github_pull_requests`, `list_github_branches`,
+`get_github_status_checks`
 
 **App logs:** `get_app_logs`, `get_vercel_logs`, `get_latest_deployment_logs`
 
@@ -198,12 +212,14 @@ See [offlocal.ai](https://offlocal.ai).
 `set_vercel_env_var`*, `create_vercel_deployment`*
 
 **Railway:** `get_railway_project_context`, `get_railway_deployments`,
-`get_railway_logs`, `create_railway_deployment`*, `set_railway_env_var`*
+`discover_railway_resources`, `get_railway_logs`, `create_railway_deployment`*,
+`set_railway_env_var`*
 
 **Supabase:** `list_supabase_projects`, `get_supabase_project_context`,
-`query_supabase`*
+`get_supabase_logs`, `query_supabase`*, `apply_supabase_migration`*
 
-**Stripe:** `list_stripe_products`, `create_stripe_product`*,
+**Stripe:** `list_stripe_products`, `list_stripe_customers`,
+`list_stripe_subscriptions`, `list_stripe_invoices`, `create_stripe_product`*,
 `create_stripe_price`*
 
 \* gated by policy (production / live / destructive operations require approval
@@ -304,15 +320,26 @@ executing:
   "environment": "production",
   "provider": "vercel",
   "action": "create_vercel_deployment",
-  "suggested_next_step": "Approve manually by adding an allow PolicyRule (set_policy_rule) ..."
+  "approval_id": "approval_...",
+  "suggested_next_step": "Review this request, then call approve_action with approval_id ..."
 }
 ```
+
+Approval is a two-step handshake. A gated action creates a pending approval
+record and never calls the provider. `approve_action` marks that request
+approved for one matching rerun; it still does **not** execute the provider
+call. Rerun the original action after approval. The approval is consumed after
+that rerun, so repeated production actions need fresh review. `reject_action`
+closes a pending request without allowing execution. Approval and rejection
+decisions are written to the audit log as `core` entries.
 
 Every provider response carries explicit `policy_decision` (`allow` / `block` /
 `approval_required`) and `executed` (boolean) fields. Blocked actions return
 `"status": "blocked"`. Both blocked and approval-required responses set
 `executed: false` and are written to the audit log with `result: "not_executed"`
-— the provider API is never called.
+— the provider API is never called. Allowed provider actions reserve the audit
+log before execution; if the audit log cannot be locked/written, the action
+returns `executed: false` and the provider API is not called.
 
 ### Audit log
 
@@ -341,6 +368,7 @@ npx -p @offlocal/mcp offlocal init                # seed from .offlocal/config.y
 npx -p @offlocal/mcp offlocal project create "Acme CRM"
 npx -p @offlocal/mcp offlocal env add staging --kind staging
 npx -p @offlocal/mcp offlocal map railway staging --resource '{"projectId":"<id>"}'
+npx -p @offlocal/mcp offlocal map vercel staging --connection conn_team_a --resource '{"projectId":"<id>"}'
 npx -p @offlocal/mcp offlocal context acme-crm --env staging
 ```
 
@@ -356,9 +384,7 @@ Contributing or running an unreleased build:
 ```bash
 git clone https://github.com/adi4x4/offlocalai-mcp && cd offlocalai-mcp
 npm install
-npm run build        # compiles to dist/
-npm test             # full test suite
-npm run typecheck
+npm run verify       # typecheck + tests + build + npm audit
 ```
 
 Then point your agent at the local build with `"command": "node", "args":
@@ -379,7 +405,7 @@ src/
   sql.ts             SQL classification (defense-in-depth)
   service.ts         business logic (used by both MCP tools and CLI)
   provider-actions.ts  guarded provider operations
-  providers/         isolated REST adapters: github, vercel, supabase, stripe
+  providers/         isolated REST adapters: github, vercel, railway, supabase, stripe
   tools/index.ts     MCP tool registration
   index.ts           stdio MCP server entry
   cli.ts             offlocal CLI
@@ -392,23 +418,21 @@ provider = one adapter file + a few guarded actions + tool registrations.
 
 ## Roadmap
 
-- **Approval flow** — replace the `approval_required` response with a real
-  approve/deny handshake (e.g. an `approve_action` tool + pending-action store).
-- **More provider surface** (Vercel git-backed deploys & file uploads, Supabase
-  migrations, Stripe subscriptions/invoices).
+- **More provider surface** (full Vercel file-upload deploys and deeper
+  provider-specific diagnostics).
 - **More providers** (the adapter interface is the extension point).
-- **Optional SQLite backend** + cross-process locking if state grows.
+- **Optional SQLite backend** if state grows beyond the local JSON store.
 
 ## Known V0 limitations / TODOs
 
-- No real approval handshake yet — approval is granted by adding a policy rule.
 - Vercel `create_deployment` supports redeploy-by-id / git-backed deploys; full
   file-upload deploys are out of scope (documented in the research note).
 - Local SQL classification is defense-in-depth, **not** a security boundary —
   Supabase's backend `read_only` flag is the real enforcement for reads. For
   production, also use a **read-only database role / restricted credentials** so a
   misclassified statement can't write even if it slips past the classifier.
-- No cross-process file locking on `.offlocal/state.json`.
+- Local JSON state uses per-file locks and atomic renames; audit appends are
+  locked as well. It is not a multi-user database.
 - Stripe live writes are gated but, once allowed, are not transactional/rollback-able.
 
 ## License

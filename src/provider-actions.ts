@@ -39,9 +39,12 @@ function resolve(store: Store, input: Base): { project: Project; environment: En
   return { project, environment };
 }
 
-function tokenFor(store: Store, provider: ProviderId): string {
-  const conn = findConnection(store, provider);
+function tokenFor(store: Store, provider: ProviderId, connectionId?: string): string {
+  const conn = findConnection(store, provider, connectionId);
   if (conn) return resolveToken(conn);
+  if (connectionId) {
+    throw new OfflocalError(`Mapping references missing ${provider} connection "${connectionId}".`);
+  }
   const envVar = defaultEnvVar(provider);
   const v = process.env[envVar];
   if (!v || v.trim().length === 0) {
@@ -52,9 +55,9 @@ function tokenFor(store: Store, provider: ProviderId): string {
   return v.trim();
 }
 
-function vercelTeamId(store: Store, mappingTeamId?: string): string | undefined {
+function vercelTeamId(store: Store, mappingTeamId?: string, connectionId?: string): string | undefined {
   if (mappingTeamId) return mappingTeamId;
-  const conn = store.data.connections.find((c) => c.provider === "vercel");
+  const conn = findConnection(store, "vercel", connectionId);
   return conn?.scope?.vercelTeamId ?? process.env.VERCEL_TEAM_ID;
 }
 
@@ -70,6 +73,21 @@ function ctx(
   return { project, environment, provider, capability, tool, summary, ...extra };
 }
 
+function assertPositiveInteger(name: string, value: number | undefined): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new OfflocalError(`${name} must be a positive integer.`);
+  }
+}
+
+function assertNonEmptyString(name: string, value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new OfflocalError(`${name} must be a non-empty string.`);
+  }
+  return trimmed;
+}
+
 // --- GitHub ----------------------------------------------------------------
 
 export async function githubRepoContext(store: Store, input: Base): Promise<GuardedResponse> {
@@ -82,7 +100,7 @@ export async function githubRepoContext(store: Store, input: Base): Promise<Guar
     ctx(project, environment, "github", "read", "get_github_repo_context", `repo ${label}`, {
       resourceLabel: label,
     }),
-    () => gh.getRepoContext(tokenFor(store, "github"), r.owner, r.repo),
+    () => gh.getRepoContext(tokenFor(store, "github", m.connectionId), r.owner, r.repo),
   );
 }
 
@@ -96,7 +114,7 @@ export async function githubReadme(store: Store, input: Base): Promise<GuardedRe
     ctx(project, environment, "github", "read", "get_github_repo_readme", `readme ${label}`, {
       resourceLabel: label,
     }),
-    () => gh.getReadme(tokenFor(store, "github"), r.owner, r.repo),
+    () => gh.getReadme(tokenFor(store, "github", m.connectionId), r.owner, r.repo),
   );
 }
 
@@ -113,7 +131,7 @@ export async function githubListFiles(
     ctx(project, environment, "github", "read", "list_github_repo_files", `files ${label}`, {
       resourceLabel: label,
     }),
-    () => gh.listFiles(tokenFor(store, "github"), r.owner, r.repo, input.path ?? ""),
+    () => gh.listFiles(tokenFor(store, "github", m.connectionId), r.owner, r.repo, input.path ?? ""),
   );
 }
 
@@ -121,7 +139,7 @@ export async function githubListFiles(
 
 function vercelResource(store: Store, project: Project, environment: Environment) {
   const m = requireMapping(store, project, environment, "vercel");
-  return m.resource as { projectId: string; projectName?: string; teamId?: string };
+  return { ...(m.resource as { projectId: string; projectName?: string; teamId?: string }), connectionId: m.connectionId };
 }
 
 export async function vercelProjectContext(store: Store, input: Base): Promise<GuardedResponse> {
@@ -132,7 +150,7 @@ export async function vercelProjectContext(store: Store, input: Base): Promise<G
     ctx(project, environment, "vercel", "read", "get_vercel_project_context", `project ${r.projectId}`, {
       resourceLabel: r.projectId,
     }),
-    () => vc.getProjectContext(tokenFor(store, "vercel"), r.projectId, vercelTeamId(store, r.teamId)),
+    () => vc.getProjectContext(tokenFor(store, "vercel", r.connectionId), r.projectId, vercelTeamId(store, r.teamId, r.connectionId)),
   );
 }
 
@@ -148,7 +166,65 @@ export async function vercelDeployments(
       resourceLabel: r.projectId,
     }),
     () =>
-      vc.listDeployments(tokenFor(store, "vercel"), r.projectId, vercelTeamId(store, r.teamId), input.limit ?? 10),
+      {
+        assertPositiveInteger("limit", input.limit);
+        return vc.listDeployments(tokenFor(store, "vercel", r.connectionId), r.projectId, vercelTeamId(store, r.teamId, r.connectionId), input.limit ?? 10);
+      },
+  );
+}
+
+export async function githubPullRequests(
+  store: Store,
+  input: Base & { state?: "open" | "closed" | "all"; limit?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const m = requireMapping(store, project, environment, "github");
+  const r = m.resource as { owner: string; repo: string };
+  const label = `${r.owner}/${r.repo}`;
+  return runGuarded(
+    store,
+    ctx(project, environment, "github", "read", "list_github_pull_requests", `pull requests ${label}`, {
+      resourceLabel: label,
+    }),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return gh.listPullRequests(tokenFor(store, "github", m.connectionId), r.owner, r.repo, {
+        state: input.state,
+        limit: input.limit ?? 10,
+      });
+    },
+  );
+}
+
+export async function githubBranches(store: Store, input: Base & { limit?: number }): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const m = requireMapping(store, project, environment, "github");
+  const r = m.resource as { owner: string; repo: string };
+  const label = `${r.owner}/${r.repo}`;
+  return runGuarded(
+    store,
+    ctx(project, environment, "github", "read", "list_github_branches", `branches ${label}`, {
+      resourceLabel: label,
+    }),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return gh.listBranches(tokenFor(store, "github", m.connectionId), r.owner, r.repo, input.limit ?? 30);
+    },
+  );
+}
+
+export async function githubStatusChecks(store: Store, input: Base & { ref: string }): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const m = requireMapping(store, project, environment, "github");
+  const r = m.resource as { owner: string; repo: string };
+  const ref = assertNonEmptyString("ref", input.ref);
+  const label = `${r.owner}/${r.repo}@${ref}`;
+  return runGuarded(
+    store,
+    ctx(project, environment, "github", "read", "get_github_status_checks", `status checks ${label}`, {
+      resourceLabel: label,
+    }),
+    () => gh.getCombinedStatus(tokenFor(store, "github", m.connectionId), r.owner, r.repo, ref),
   );
 }
 
@@ -163,7 +239,7 @@ export async function vercelDeploymentStatus(
     ctx(project, environment, "vercel", "read", "get_vercel_deployment_status", `status ${input.deploymentId}`, {
       resourceLabel: input.deploymentId,
     }),
-    () => vc.getDeploymentStatus(tokenFor(store, "vercel"), input.deploymentId, vercelTeamId(store, r.teamId)),
+    () => vc.getDeploymentStatus(tokenFor(store, "vercel", r.connectionId), input.deploymentId, vercelTeamId(store, r.teamId, r.connectionId)),
   );
 }
 
@@ -179,7 +255,10 @@ export async function vercelDeploymentLogs(
       resourceLabel: input.deploymentId,
     }),
     () =>
-      vc.getDeploymentLogs(tokenFor(store, "vercel"), input.deploymentId, vercelTeamId(store, r.teamId), input.limit ?? 100),
+      {
+        assertPositiveInteger("limit", input.limit);
+        return vc.getDeploymentLogs(tokenFor(store, "vercel", r.connectionId), input.deploymentId, vercelTeamId(store, r.teamId, r.connectionId), input.limit ?? 100);
+      },
   );
 }
 
@@ -197,17 +276,21 @@ export async function vercelSetEnvVar(
     }),
     () =>
       vc.setEnvVar(
-        tokenFor(store, "vercel"),
+        tokenFor(store, "vercel", r.connectionId),
         r.projectId,
-        { key: input.key, value: input.value, target },
-        vercelTeamId(store, r.teamId),
+        { key: assertNonEmptyString("key", input.key), value: input.value, target },
+        vercelTeamId(store, r.teamId, r.connectionId),
       ),
   );
 }
 
 export async function vercelCreateDeployment(
   store: Store,
-  input: Base & { name?: string; deploymentId?: string },
+  input: Base & {
+    name?: string;
+    deploymentId?: string;
+    gitSource?: { type: "github"; repoId: string; ref?: string; sha?: string };
+  },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
   const r = vercelResource(store, project, environment);
@@ -219,9 +302,15 @@ export async function vercelCreateDeployment(
     }),
     () =>
       vc.createDeployment(
-        tokenFor(store, "vercel"),
-        { name: input.name ?? r.projectName ?? r.projectId, project: r.projectId, target, deploymentId: input.deploymentId },
-        vercelTeamId(store, r.teamId),
+        tokenFor(store, "vercel", r.connectionId),
+        {
+          name: input.name ?? r.projectName ?? r.projectId,
+          project: r.projectId,
+          target,
+          deploymentId: input.deploymentId,
+          gitSource: input.gitSource,
+        },
+        vercelTeamId(store, r.teamId, r.connectionId),
       ),
   );
 }
@@ -292,13 +381,24 @@ function httpsUrl(u?: string): string | undefined {
   return /^https?:\/\//i.test(u) ? u : `https://${u}`;
 }
 
+/** Validate the optional `since` filter before any provider calls are made. */
+function assertValidSince(since?: string): void {
+  if (!since) return;
+  const asNum = Number(since);
+  if (Number.isFinite(asNum) && asNum > 0) return;
+  const parsed = Date.parse(since);
+  if (Number.isNaN(parsed)) {
+    throw new OfflocalError("since must be a positive epoch millisecond value or a valid ISO timestamp.");
+  }
+}
+
 /** Parse the optional `since` (epoch ms or ISO timestamp) into epoch ms. */
 function sinceMs(since?: string): number | undefined {
+  assertValidSince(since);
   if (!since) return undefined;
   const asNum = Number(since);
   if (Number.isFinite(asNum) && asNum > 0) return asNum;
-  const parsed = Date.parse(since);
-  return Number.isNaN(parsed) ? undefined : parsed;
+  return Date.parse(since);
 }
 
 /**
@@ -313,6 +413,8 @@ async function fetchVercelLogsData(
   teamId: string | undefined,
   opts: { deploymentId?: string; since?: string; limit?: number },
 ): Promise<LogResult> {
+  assertPositiveInteger("limit", opts.limit);
+  const since = sinceMs(opts.since);
   const limit = opts.limit ?? 100;
   const time_range = { since: opts.since };
 
@@ -354,7 +456,7 @@ async function fetchVercelLogsData(
   };
 
   try {
-    const events = await vc.getDeploymentLogs(token, deploymentId, teamId, limit, sinceMs(opts.since));
+    const events = await vc.getDeploymentLogs(token, deploymentId, teamId, limit, since);
     const logs = events.map(normalizeVercelEvent);
     const limitation =
       logs.length === 0
@@ -384,13 +486,13 @@ function runVercelLogs(
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
   const r = vercelResource(store, project, environment);
-  const teamId = vercelTeamId(store, r.teamId);
+  const teamId = vercelTeamId(store, r.teamId, r.connectionId);
   const label = input.deploymentId ?? r.projectId;
   return runGuarded(
     store,
     ctx(project, environment, "vercel", "read", tool, `logs ${label}`, { resourceLabel: label }),
     () =>
-      fetchVercelLogsData(tokenFor(store, "vercel"), r, teamId, {
+      fetchVercelLogsData(tokenFor(store, "vercel", r.connectionId), r, teamId, {
         deploymentId: input.deploymentId,
         since: input.since,
         limit: input.limit,
@@ -410,12 +512,12 @@ export function vercelLogs(
 
 function railwayResource(store: Store, project: Project, environment: Environment) {
   const m = requireMapping(store, project, environment, "railway");
-  return m.resource as {
+  return { ...(m.resource as {
     projectId: string;
     environmentId?: string;
     serviceId?: string;
     projectName?: string;
-  };
+  }), connectionId: m.connectionId };
 }
 
 /**
@@ -428,6 +530,8 @@ async function fetchRailwayLogsData(
   r: { projectId: string; environmentId?: string; serviceId?: string },
   opts: { deploymentId?: string; since?: string; limit?: number },
 ): Promise<LogResult> {
+  assertPositiveInteger("limit", opts.limit);
+  assertValidSince(opts.since);
   const limit = opts.limit ?? 100;
   const time_range = { since: opts.since };
 
@@ -498,7 +602,7 @@ function runRailwayLogs(
     store,
     ctx(project, environment, "railway", "read", tool, `logs ${label}`, { resourceLabel: label }),
     () =>
-      fetchRailwayLogsData(tokenFor(store, "railway"), r, {
+      fetchRailwayLogsData(tokenFor(store, "railway", r.connectionId), r, {
         deploymentId: input.deploymentId,
         since: input.since,
         limit: input.limit,
@@ -523,7 +627,7 @@ export async function railwayProjectContext(store: Store, input: Base): Promise<
     ctx(project, environment, "railway", "read", "get_railway_project_context", `project ${r.projectId}`, {
       resourceLabel: r.projectId,
     }),
-    () => rw.getProject(tokenFor(store, "railway"), r.projectId),
+    () => rw.getProject(tokenFor(store, "railway", r.connectionId), r.projectId),
   );
 }
 
@@ -539,12 +643,24 @@ export async function railwayDeployments(
     ctx(project, environment, "railway", "read", "get_railway_deployments", `deployments ${r.projectId}`, {
       resourceLabel: r.projectId,
     }),
-    () =>
-      rw.listDeployments(
-        tokenFor(store, "railway"),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return rw.listDeployments(
+        tokenFor(store, "railway", r.connectionId),
         { projectId: r.projectId, environmentId: r.environmentId, serviceId: r.serviceId },
         input.limit ?? 10,
-      ),
+      );
+    },
+  );
+}
+
+export async function railwayDiscover(store: Store, input: Base): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const mapping = findMapping(store, environment, "railway");
+  return runGuarded(
+    store,
+    ctx(project, environment, "railway", "read", "discover_railway_resources", "discover railway projects"),
+    () => rw.listProjects(tokenFor(store, "railway", mapping?.connectionId)),
   );
 }
 
@@ -566,7 +682,7 @@ export async function railwayCreateDeployment(
       resourceLabel: label,
     }),
     () => {
-      const token = tokenFor(store, "railway");
+      const token = tokenFor(store, "railway", r.connectionId);
       if (input.deploymentId) return rw.redeploy(token, input.deploymentId);
       if (!r.environmentId || !r.serviceId) {
         throw new OfflocalError(
@@ -605,11 +721,11 @@ export async function railwaySetEnvVar(
           "Railway variable changes need the mapping to include environmentId.",
         );
       }
-      return rw.upsertVariable(tokenFor(store, "railway"), {
+      return rw.upsertVariable(tokenFor(store, "railway", r.connectionId), {
         projectId: r.projectId,
         environmentId: r.environmentId,
         serviceId: input.serviceId ?? r.serviceId,
-        name: input.key,
+        name: assertNonEmptyString("key", input.key),
         value: input.value,
         skipDeploys: input.skipDeploys,
       });
@@ -719,10 +835,11 @@ export async function appLogs(
 export async function supabaseListProjects(store: Store, input: Base): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
   // Account-level read; uses the env-scoped connection only for the token + audit.
+  const mapping = findMapping(store, environment, "supabase");
   return runGuarded(
     store,
     ctx(project, environment, "supabase", "read", "list_supabase_projects", "list supabase projects"),
-    () => sb.listProjects(tokenFor(store, "supabase")),
+    () => sb.listProjects(tokenFor(store, "supabase", mapping?.connectionId)),
   );
 }
 
@@ -735,7 +852,7 @@ export async function supabaseProjectContext(store: Store, input: Base): Promise
     ctx(project, environment, "supabase", "read", "get_supabase_project_context", `project ${r.projectRef}`, {
       resourceLabel: r.projectRef,
     }),
-    () => sb.getProject(tokenFor(store, "supabase"), r.projectRef),
+    () => sb.getProject(tokenFor(store, "supabase", m.connectionId), r.projectRef),
   );
 }
 
@@ -760,7 +877,50 @@ export async function supabaseQuery(
     ),
     // Reads are sent with read_only:true (real backend enforcement). Writes that
     // are allowed by policy run as read_only:false.
-    () => sb.runQuery(tokenFor(store, "supabase"), r.projectRef, input.sql, classified.readOnly),
+    () => sb.runQuery(tokenFor(store, "supabase", m.connectionId), r.projectRef, assertNonEmptyString("sql", input.sql), classified.readOnly),
+  );
+}
+
+export async function supabaseLogs(
+  store: Store,
+  input: Base & { service?: string; since?: string; limit?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const m = requireMapping(store, project, environment, "supabase");
+  const r = m.resource as { projectRef: string };
+  return runGuarded(
+    store,
+    ctx(project, environment, "supabase", "read", "get_supabase_logs", `logs ${r.projectRef}`, {
+      resourceLabel: r.projectRef,
+    }),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return sb.getProjectLogs(tokenFor(store, "supabase", m.connectionId), r.projectRef, {
+        service: input.service,
+        since: input.since,
+        limit: input.limit ?? 100,
+      });
+    },
+  );
+}
+
+export async function supabaseApplyMigration(
+  store: Store,
+  input: Base & { name: string; sql: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const m = requireMapping(store, project, environment, "supabase");
+  const r = m.resource as { projectRef: string };
+  return runGuarded(
+    store,
+    ctx(project, environment, "supabase", "write", "apply_supabase_migration", `migration ${input.name} on ${r.projectRef}`, {
+      resourceLabel: r.projectRef,
+    }),
+    () =>
+      sb.applyMigration(tokenFor(store, "supabase", m.connectionId), r.projectRef, {
+        name: assertNonEmptyString("name", input.name),
+        query: assertNonEmptyString("sql", input.sql),
+      }),
   );
 }
 
@@ -771,6 +931,12 @@ function stripeMode(store: Store, environment: Environment): "test" | "live" {
   if (m && m.resource.provider === "stripe") return m.resource.mode;
   // Fall back to env kind if no explicit mapping.
   return environment.isProduction ? "live" : "test";
+}
+
+function stripeKeyFor(store: Store, environment: Environment, mode: "test" | "live"): string {
+  const m = findMapping(store, environment, "stripe");
+  if (m?.connectionId) return tokenFor(store, "stripe", m.connectionId);
+  return resolveStripeKey(mode);
 }
 
 export async function stripeListProducts(
@@ -784,7 +950,70 @@ export async function stripeListProducts(
     ctx(project, environment, "stripe", "read", "list_stripe_products", `list products (${mode})`, {
       resourceLabel: mode,
     }),
-    () => st.listProducts(resolveStripeKey(mode), input.limit ?? 10),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return st.listProducts(stripeKeyFor(store, environment, mode), input.limit ?? 10);
+    },
+  );
+}
+
+export async function stripeListCustomers(
+  store: Store,
+  input: Base & { limit?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const mode = stripeMode(store, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "stripe", "read", "list_stripe_customers", `list customers (${mode})`, {
+      resourceLabel: mode,
+    }),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return st.listCustomers(stripeKeyFor(store, environment, mode), input.limit ?? 10);
+    },
+  );
+}
+
+export async function stripeListSubscriptions(
+  store: Store,
+  input: Base & { limit?: number; status?: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const mode = stripeMode(store, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "stripe", "read", "list_stripe_subscriptions", `list subscriptions (${mode})`, {
+      resourceLabel: mode,
+    }),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return st.listSubscriptions(stripeKeyFor(store, environment, mode), {
+        limit: input.limit ?? 10,
+        status: input.status,
+      });
+    },
+  );
+}
+
+export async function stripeListInvoices(
+  store: Store,
+  input: Base & { limit?: number; customer?: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const mode = stripeMode(store, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "stripe", "read", "list_stripe_invoices", `list invoices (${mode})`, {
+      resourceLabel: mode,
+    }),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return st.listInvoices(stripeKeyFor(store, environment, mode), {
+        limit: input.limit ?? 10,
+        customer: input.customer,
+      });
+    },
   );
 }
 
@@ -800,7 +1029,7 @@ export async function stripeCreateProduct(
       live: mode === "live",
       resourceLabel: mode,
     }),
-    () => st.createProduct(resolveStripeKey(mode), { name: input.name, description: input.description }),
+    () => st.createProduct(stripeKeyFor(store, environment, mode), { name: assertNonEmptyString("name", input.name), description: input.description }),
   );
 }
 
@@ -821,12 +1050,14 @@ export async function stripeCreatePrice(
       live: mode === "live",
       resourceLabel: mode,
     }),
-    () =>
-      st.createPrice(resolveStripeKey(mode), {
+    () => {
+      assertPositiveInteger("unitAmount", input.unitAmount);
+      return st.createPrice(stripeKeyFor(store, environment, mode), {
         product: input.product,
         currency: input.currency,
         unitAmount: input.unitAmount,
         recurringInterval: input.recurringInterval,
-      }),
+      });
+    },
   );
 }

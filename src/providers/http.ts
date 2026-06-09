@@ -6,7 +6,11 @@ export interface HttpOptions {
   /** Raw body (string) — already encoded by the caller. */
   body?: string;
   query?: Record<string, string | undefined>;
+  timeoutMs?: number;
 }
+
+const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
+const DEFAULT_HTTP_RETRIES = 2;
 
 function withQuery(url: string, query?: Record<string, string | undefined>): string {
   if (!query) return url;
@@ -16,6 +20,58 @@ function withQuery(url: string, query?: Record<string, string | undefined>): str
   }
   const qs = params.toString();
   return qs ? `${url}${url.includes("?") ? "&" : "?"}${qs}` : url;
+}
+
+function redactSecrets(text: string): string {
+  return text
+    .replace(
+      /([?&][^=&]*(?:token|secret|password|api_?key|access_token)[^=&]*=)[^&\s"]+/gi,
+      "$1***REDACTED***",
+    )
+    .replace(
+      /("([^"]*(?:token|secret|password|api_?key|access_token)[^"]*)"\s*:\s*")([^"]*)(")/gi,
+      "$1***REDACTED***$4",
+    )
+    .replace(
+      /\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_TOKEN)[A-Z0-9_]*)\s*[=:]\s*("?)[^\s",}]+\2/gi,
+      "$1=***REDACTED***",
+    );
+}
+
+function readTimeoutMs(timeoutMs?: number): number {
+  const raw = timeoutMs ?? process.env.OFFLOCAL_HTTP_TIMEOUT_MS ?? DEFAULT_HTTP_TIMEOUT_MS;
+  const parsed = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new OfflocalError("OFFLOCAL_HTTP_TIMEOUT_MS must be a positive integer number of milliseconds.");
+  }
+  return parsed;
+}
+
+function readRetries(method: string): number {
+  if (method !== "GET" && method !== "HEAD") return 0;
+  const raw = process.env.OFFLOCAL_HTTP_RETRIES ?? String(DEFAULT_HTTP_RETRIES);
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new OfflocalError("OFFLOCAL_HTTP_RETRIES must be a non-negative integer.");
+  }
+  return parsed;
+}
+
+function shouldRetry(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+function retryDelayMs(attempt: number): number {
+  const raw = process.env.OFFLOCAL_HTTP_RETRY_BASE_MS ?? "25";
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new OfflocalError("OFFLOCAL_HTTP_RETRY_BASE_MS must be a non-negative integer number of milliseconds.");
+  }
+  return parsed * attempt;
+}
+
+function sleep(ms: number): Promise<void> {
+  return ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -28,39 +84,63 @@ export async function httpJson<T = unknown>(
   opts: HttpOptions = {},
 ): Promise<T> {
   const finalUrl = withQuery(url, opts.query);
-  let res: Response;
-  try {
-    res = await fetch(finalUrl, {
-      method: opts.method ?? "GET",
-      headers: opts.headers,
-      body: opts.body,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new OfflocalError(`Network error calling ${finalUrl}: ${message}`);
-  }
+  const timeoutMs = readTimeoutMs(opts.timeoutMs);
+  const method = opts.method ?? "GET";
+  const maxRetries = readRetries(method);
+  let lastError: OfflocalError | undefined;
 
-  const text = await res.text();
-  let parsed: unknown = undefined;
-  if (text.length > 0) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let res: Response;
     try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = text;
+      res = await fetch(finalUrl, {
+        method,
+        headers: opts.headers,
+        body: opts.body,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timeout);
+      const message = controller.signal.aborted
+        ? `Timed out after ${timeoutMs}ms calling ${redactSecrets(finalUrl)}.`
+        : `Network error calling ${redactSecrets(finalUrl)}: ${err instanceof Error ? err.message : String(err)}`;
+      lastError = new OfflocalError(message);
+      if (attempt < maxRetries) {
+        await sleep(retryDelayMs(attempt + 1));
+        continue;
+      }
+      throw lastError;
     }
-  }
+    clearTimeout(timeout);
 
-  if (!res.ok) {
+    const text = await res.text();
+    let parsed: unknown = undefined;
+    if (text.length > 0) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
+    }
+
+    if (res.ok) return parsed as T;
+
     const detail =
       typeof parsed === "object" && parsed !== null
         ? JSON.stringify(parsed)
         : String(parsed ?? "");
-    throw new OfflocalError(
-      `${res.status} ${res.statusText} from ${url}${detail ? `: ${detail.slice(0, 500)}` : ""}`,
+    lastError = new OfflocalError(
+      `${res.status} ${res.statusText} from ${redactSecrets(url)}${detail ? `: ${redactSecrets(detail).slice(0, 500)}` : ""}`,
     );
+    if (attempt < maxRetries && shouldRetry(res.status)) {
+      await sleep(retryDelayMs(attempt + 1));
+      continue;
+    }
+    throw lastError;
   }
 
-  return parsed as T;
+  throw lastError ?? new OfflocalError(`Failed calling ${redactSecrets(finalUrl)}.`);
 }
 
 /** Encode an object as application/x-www-form-urlencoded, incl. bracketed nesting. */
