@@ -130,6 +130,10 @@ env = { GITHUB_TOKEN = "ghp_your_token", VERCEL_TOKEN = "your_vercel_token" }
 | `OFFLOCAL_MEMORY_MAX_ENTRIES` | Runtime | Optional cap for retained local memory entries |
 | `OFFLOCAL_AUDIT_MAX_ENTRIES` | Runtime | Optional cap for retained audit log entries |
 | `OFFLOCAL_LOG_STARTUP` | Runtime | Set to `true` to emit structured CLI startup logs to stderr |
+| `DASHCLAW_BASE_URL` | DashClaw | Optional authoritative governance gate base URL |
+| `DASHCLAW_API_KEY` | DashClaw | Workspace API key sent as `x-api-key` |
+| `DASHCLAW_TIMEOUT_MS` | DashClaw | Optional DashClaw timeout in milliseconds; defaults to `30000` |
+| `OFFLOCAL_DASHCLAW_MODE` | DashClaw | `authoritative` in this version |
 
 ### Step 3 — Let the agent set up your project (no YAML)
 
@@ -201,6 +205,10 @@ See [offlocal.ai](https://offlocal.ai).
 **Memory / audit:** `read_project_memory`, `write_project_memory`,
 `list_audit_log`, `export_audit_log`
 
+**DashClaw:** `dashclaw_status`, `dashclaw_recent_decisions`,
+`export_dashclaw_evidence`, `explain_action_risk`,
+`governed_action_summary`
+
 **GitHub:** `get_github_repo_context`, `get_github_repo_readme`,
 `list_github_repo_files`, `list_github_pull_requests`, `list_github_branches`,
 `get_github_status_checks`
@@ -231,6 +239,38 @@ or are blocked — see below).
 > Supabase project, the Stripe mode, the **allowed / blocked / approval-required**
 > action lists, project memory, recent audit history, **suggested safe next
 > actions**, and a human-readable `summary` the agent can reason from directly.
+
+---
+
+## Governed Infrastructure Actions
+
+offlocal can use DashClaw as the authoritative guard for risky provider actions.
+In this mode, offlocal remains the provider execution layer and DashClaw becomes
+the decision, approval, and evidence authority.
+
+Risky actions are writes, deploys, env-var changes, deletes, destructive SQL, and
+live-mode actions. These actions call DashClaw before execution. If DashClaw
+allows the action, offlocal executes it and records the outcome. If DashClaw
+blocks or requires approval, offlocal does not call the provider. If DashClaw is
+unavailable, risky actions fail closed. Read actions continue through local
+policy and audit.
+
+Required env vars:
+
+| Variable | Notes |
+|---|---|
+| `DASHCLAW_BASE_URL` | DashClaw base URL, e.g. `https://dashclaw.example.com` |
+| `DASHCLAW_API_KEY` | Workspace API key sent as `x-api-key` |
+| `DASHCLAW_TIMEOUT_MS` | Optional DashClaw timeout; defaults to `30000` |
+| `OFFLOCAL_DASHCLAW_MODE` | `authoritative` in this version |
+
+DashClaw tools:
+
+- `dashclaw_status`
+- `dashclaw_recent_decisions`
+- `export_dashclaw_evidence`
+- `explain_action_risk`
+- `governed_action_summary`
 
 ---
 

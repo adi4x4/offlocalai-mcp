@@ -45,5 +45,9 @@ describe("npm package contents", () => {
     expect(readme).toContain("offlocal-mcp");
     expect(readme).toContain("OFFLOCAL_HTTP_RETRIES");
     expect(readme).toContain("OFFLOCAL_AUDIT_MAX_ENTRIES");
+    expect(readme).toContain("Governed Infrastructure Actions");
+    expect(readme).toContain("DASHCLAW_BASE_URL");
+    expect(readme).toContain("DASHCLAW_API_KEY");
+    expect(readme).toContain("dashclaw_status");
   });
 });

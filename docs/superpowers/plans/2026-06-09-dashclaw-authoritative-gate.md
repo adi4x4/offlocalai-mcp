@@ -1583,7 +1583,7 @@ git commit -m "feat: expose dashclaw governance tools"
 - Modify: `README.md`
 - Modify: `test/package.test.ts`
 
-- [ ] **Step 1: Add failing docs smoke test**
+- [x] **Step 1: Add failing docs smoke test**
 
 In `test/package.test.ts`, extend the README smoke test:
 
@@ -1594,7 +1594,7 @@ In `test/package.test.ts`, extend the README smoke test:
     expect(readme).toContain("dashclaw_status");
 ```
 
-- [ ] **Step 2: Run package test and verify failure**
+- [x] **Step 2: Run package test and verify failure**
 
 Run:
 
@@ -1604,7 +1604,7 @@ npm test -- test/package.test.ts
 
 Expected: fail until README/env docs are updated.
 
-- [ ] **Step 3: Update `.env.example`**
+- [x] **Step 3: Update `.env.example`**
 
 Add:
 
@@ -1617,7 +1617,7 @@ DASHCLAW_TIMEOUT_MS=30000
 OFFLOCAL_DASHCLAW_MODE=authoritative
 ```
 
-- [ ] **Step 4: Update README**
+- [x] **Step 4: Update README**
 
 Add a section after the MCP tools list:
 
@@ -1655,7 +1655,7 @@ DashClaw tools:
 
 Also add these tools to the existing MCP tool inventory under a new **DashClaw** line.
 
-- [ ] **Step 5: Run docs tests and commit**
+- [x] **Step 5: Run docs tests and commit**
 
 Run:
 
