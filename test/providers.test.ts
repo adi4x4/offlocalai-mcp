@@ -94,6 +94,93 @@ describe("Vercel", () => {
   });
 });
 
+describe("App logs", () => {
+  /** Route a mocked fetch by URL to the right Vercel endpoint payload. */
+  function routeVercel(opts: { deployments?: any[]; events?: any[]; status?: any }) {
+    return (url: string) => {
+      if (url.includes("/v7/deployments")) return mockOk({ deployments: opts.deployments ?? [] });
+      if (/\/v3\/deployments\/[^/]+\/events/.test(url)) return mockOk(opts.events ?? []);
+      if (url.includes("/v13/deployments/")) return mockOk(opts.status ?? {});
+      return mockOk({});
+    };
+  }
+
+  const LATEST = { uid: "dpl_123", url: "acme.vercel.app", readyState: "ERROR", state: "ERROR", created: 1700000000000 };
+
+  it("get_vercel_logs resolves the latest deployment and returns normalized logs", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockImplementation(async (url: string) =>
+      routeVercel({
+        deployments: [LATEST],
+        events: [
+          { type: "stdout", created: 1700000001000, text: "Building..." },
+          { type: "stderr", created: 1700000002000, text: "Error: DATABASE_URL is missing" },
+        ],
+      })(url),
+    );
+
+    const res = await pa.vercelLogs(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    const data = (res as any).data;
+    expect(data.resource.deployment_id).toBe("dpl_123");
+    expect(data.resource.deployment_status).toBe("ERROR");
+    expect(data.resource.deployment_url).toBe("https://acme.vercel.app");
+    expect(data.logs).toHaveLength(2);
+    expect(data.logs[1]).toMatchObject({ level: "error", message: "Error: DATABASE_URL is missing" });
+    expect(data.audit_written).toBe(true);
+    expect(lastAudit(store)).toMatchObject({ result: "success", policyDecision: "allow", provider: "vercel", tool: "get_vercel_logs" });
+  });
+
+  it("redacts secrets that appear in log lines", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockImplementation(async (url: string) =>
+      routeVercel({
+        deployments: [LATEST],
+        events: [{ type: "stdout", created: 1700000001000, text: "Using key sk_live_ABCDEFGH123456789" }],
+      })(url),
+    );
+    const res = await pa.vercelLogs(store, { environment: "staging" });
+    const msg = (res as any).data.logs[0].message;
+    expect(msg).not.toContain("sk_live_ABCDEFGH123456789");
+    expect(msg).toContain("REDACTED");
+  });
+
+  it("returns a limitation (not an error) when the events API yields no logs", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockImplementation(async (url: string) => routeVercel({ deployments: [LATEST], events: [] })(url));
+    const res = await pa.vercelLogs(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    const data = (res as any).data;
+    expect(data.logs).toHaveLength(0);
+    expect(typeof data.limitation).toBe("string");
+  });
+
+  it("get_app_logs with no provider discovers the mapped Vercel project and audits the read", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockImplementation(async (url: string) =>
+      routeVercel({ deployments: [LATEST], events: [{ type: "stdout", created: 1700000001000, text: "ok" }] })(url),
+    );
+    const res = await pa.appLogs(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    expect(res.providers).toHaveLength(1);
+    expect((res.providers[0] as any).provider).toBe("vercel");
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "vercel", tool: "get_app_logs" });
+  });
+
+  it("get_latest_deployment_logs returns a clear limitation for unsupported providers", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const res = await pa.latestDeploymentLogs(store, { environment: "staging", provider: "supabase" });
+    expect(res.status).toBe("ok");
+    expect((res as any).data.limitation).toMatch(/not supported/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("Supabase", () => {
   it("blocks destructive SQL everywhere and does NOT execute", async () => {
     const store = freshStore();

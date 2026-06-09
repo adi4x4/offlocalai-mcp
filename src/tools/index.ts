@@ -301,6 +301,89 @@ function registerProviderTools(server: McpServer, store: Store): void {
   const env = z.string().describe("Environment id or name");
   const proj = z.string().optional().describe("Project id or slug; uses selected if omitted");
 
+  // --- App logs ----------------------------------------------------------
+  // Log reads are allowed by default in every environment (including
+  // production); each read is policy-checked and written to the audit log.
+
+  server.registerTool(
+    "get_app_logs",
+    {
+      title: "Get app logs",
+      description:
+        "Fetch application/deployment logs for a project environment from the mapped provider(s). " +
+        "If `provider` is given, reads that provider only; otherwise reads every mapped provider " +
+        "that supports logs (Vercel prioritized in V0). Returns the resource used, time range, log " +
+        "lines, and any API limitation. Reads are allowed everywhere and are audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        provider: provider.optional().describe("Restrict to one provider (e.g. 'vercel')"),
+        deployment_id: z.string().optional().describe("Specific deployment to read logs for"),
+        since: z.string().optional().describe("Only logs after this time (epoch ms or ISO timestamp)"),
+        limit: z.number().optional().describe("Max log lines (default 100)"),
+      },
+    },
+    guard((a: any) =>
+      pa.appLogs(store, {
+        project: a.project,
+        environment: a.environment,
+        provider: a.provider,
+        deploymentId: a.deployment_id,
+        since: a.since,
+        limit: a.limit,
+      }),
+    ),
+  );
+
+  server.registerTool(
+    "get_vercel_logs",
+    {
+      title: "Get Vercel logs",
+      description:
+        "Fetch logs from the mapped Vercel project. If `deployment_id` is given, reads that " +
+        "deployment; otherwise resolves the latest deployment first. Returns the deployment " +
+        "id/url/status plus log lines. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        deployment_id: z.string().optional().describe("Deployment to read logs for; defaults to latest"),
+        since: z.string().optional().describe("Only logs after this time (epoch ms or ISO timestamp)"),
+        limit: z.number().optional().describe("Max log lines (default 100)"),
+      },
+    },
+    guard((a: any) =>
+      pa.vercelLogs(store, {
+        project: a.project,
+        environment: a.environment,
+        deploymentId: a.deployment_id,
+        since: a.since,
+        limit: a.limit,
+      }),
+    ),
+  );
+
+  server.registerTool(
+    "get_latest_deployment_logs",
+    {
+      title: "Get latest deployment logs",
+      description:
+        "Convenience: find the latest deployment for the mapped provider (default Vercel) and " +
+        "fetch its logs. Returns deployment status + logs. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        provider: provider.optional().describe("Defaults to 'vercel'"),
+      },
+    },
+    guard((a: any) =>
+      pa.latestDeploymentLogs(store, {
+        project: a.project,
+        environment: a.environment,
+        provider: a.provider,
+      }),
+    ),
+  );
+
   // GitHub
   server.registerTool(
     "get_github_repo_context",

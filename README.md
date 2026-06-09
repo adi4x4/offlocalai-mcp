@@ -203,6 +203,8 @@ The server reads `.offlocal/` from the current working directory (override with
 **GitHub:** `get_github_repo_context`, `get_github_repo_readme`,
 `list_github_repo_files`
 
+**App logs:** `get_app_logs`, `get_vercel_logs`, `get_latest_deployment_logs`
+
 **Vercel:** `get_vercel_project_context`, `get_vercel_deployments`,
 `get_vercel_deployment_status`, `get_vercel_deployment_logs`,
 `set_vercel_env_var`*, `create_vercel_deployment`*
@@ -222,6 +224,56 @@ or are blocked — see below).
 > Supabase project, the Stripe mode, the **allowed / blocked / approval-required**
 > action lists, project memory, recent audit history, **suggested safe next
 > actions**, and a human-readable `summary` the agent can reason from directly.
+
+---
+
+## Fetch app logs
+
+Ask the agent something like *"Use offlocalai to fetch the latest staging logs."*
+It resolves the project/environment, finds the mapped Vercel project, fetches the
+latest deployment's logs, and the read is written to the audit log.
+
+- `get_app_logs` — generic. Pass `project` + `environment` (and optionally
+  `provider`, `deployment_id`, `since`, `limit`). With no `provider` it reads
+  every mapped provider that supports logs (Vercel prioritized in V0).
+- `get_vercel_logs` — Vercel-specific. Resolves the latest deployment when
+  `deployment_id` is omitted; returns the deployment id/url/status plus logs.
+- `get_latest_deployment_logs` — convenience; latest deployment for the mapped
+  provider (default Vercel).
+
+Log reads are a `read` capability, so they are **allowed by default in every
+environment, including production**. Secrets are redacted from log lines where
+recognizable, and every read is audited. If the provider's API can't return log
+lines, the tool returns the deployment status plus a clear `limitation` instead
+of failing silently — it never fabricates logs.
+
+```json
+{
+  "status": "ok",
+  "project": "acme-crm",
+  "environment": "staging",
+  "provider": "vercel",
+  "policy_decision": "allow",
+  "executed": true,
+  "data": {
+    "resource": {
+      "project": "acme-crm-preview",
+      "deployment_id": "dpl_…",
+      "deployment_url": "https://acme-crm-preview.vercel.app",
+      "deployment_status": "ERROR"
+    },
+    "time_range": { "since": null },
+    "logs": [
+      { "timestamp": "2026-06-09T12:00:02.000Z", "level": "error", "message": "Error: DATABASE_URL is missing" }
+    ],
+    "audit_written": true
+  }
+}
+```
+
+> Vercel's events API exposes build logs and recent runtime events. Older
+> runtime logs require a configured log drain and are not retrievable through
+> this API — the tool reports that as a `limitation`.
 
 ---
 

@@ -106,10 +106,16 @@ export async function getDeploymentLogs(
   idOrUrl: string,
   teamId?: string,
   limit = 100,
+  since?: number,
 ): Promise<VercelLogEvent[]> {
   const data = await httpJson<any>(`${BASE}/v3/deployments/${idOrUrl}/events`, {
     headers: headers(token),
-    query: { ...teamQuery(teamId), limit: String(limit), builds: "1" },
+    query: {
+      ...teamQuery(teamId),
+      limit: String(limit),
+      builds: "1",
+      since: since !== undefined ? String(since) : undefined,
+    },
   });
   const arr = Array.isArray(data) ? data : (data?.events ?? []);
   return arr.map((e: Record<string, any>) => ({
