@@ -1,4 +1,4 @@
-# offlocalai-mcp
+# @offlocal/mcp
 
 **Production context layer for AI coding agents.**
 
@@ -20,7 +20,7 @@ A tool that can "deploy to Vercel" is dangerous if the agent doesn't know
 *which* Vercel project, in *which* environment, for *which* account — and
 whether it's even allowed to.
 
-`offlocalai-mcp` is one local MCP server an agent connects to so it can ask:
+`@offlocal/mcp` is one local MCP server an agent connects to so it can ask:
 
 - Which project am I working on?
 - Which environment is active?
@@ -37,7 +37,7 @@ provider API → audit log / project memory** before any real action runs.
 
 ```
 AI coding agent
-  → offlocalai-mcp
+  → @offlocal/mcp
     → workspace
       → project            (your-project)
         → environment      (staging | production)
@@ -67,64 +67,52 @@ research behind each adapter.
 
 ---
 
-## Install & build
+## Getting started
 
-```bash
-git clone <repo> && cd offlocalai-mcp
-npm install
-npm run build      # compiles to dist/
-npm test           # 24 tests
-npm run typecheck
+Requires Node ≥ 18. There is **nothing to clone and no config file to fill in** —
+the server runs straight from npm, and you set everything else up by talking to
+your agent.
+
+### Step 1 — Add offlocal to your AI agent
+
+Point your agent at `@offlocal/mcp` over `npx` and pass the provider tokens you
+actually use as env vars. The server is published to npm, so `npx` fetches and
+runs it on demand.
+
+**Claude Code** — create `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "offlocal": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "-p", "@offlocal/mcp", "offlocal-mcp"],
+      "env": {
+        "GITHUB_TOKEN": "ghp_your_token",
+        "VERCEL_TOKEN": "your_vercel_token",
+        "RAILWAY_TOKEN": "your_railway_token"
+      }
+    }
+  }
+}
 ```
 
-Requires Node ≥ 18 (developed on Node 22).
+**Cursor** — `.cursor/mcp.json` (same shape, drop the `"type"` field).
+**Codex** — `~/.codex/config.toml`:
 
-## Configure a project
-
-Describe your real projects in `.offlocal/config.yaml`, then seed state:
-
-```bash
-cp .offlocal/config.example.yaml .offlocal/config.yaml
-# edit it — replace the placeholders with your real repos/projects/refs
-node dist/cli.js init
-node dist/cli.js context <your-project>
+```toml
+[mcp_servers.offlocal]
+command = "npx"
+args = ["-y", "-p", "@offlocal/mcp", "offlocal-mcp"]
+env = { GITHUB_TOKEN = "ghp_your_token", VERCEL_TOKEN = "your_vercel_token" }
 ```
 
-`.offlocal/config.yaml` — projects → environments → which provider account each
-environment uses, plus policy. Replace every placeholder with your real values:
+> Only include tokens for the providers you'll use — every other provider simply
+> stays unavailable. Tokens are read at call time and never written to disk.
+> Restart your agent (or reconnect MCP servers) after editing the config.
 
-```yaml
-projects:
-  your-project:                              # id-safe slug
-    name: Your Project
-    environments:
-      staging:
-        github:   { repo: your-org/your-repo }
-        vercel:   { project: your-staging-vercel-project }
-        supabase: { project_ref: your_staging_project_ref }
-        stripe:   { mode: test }
-      production:
-        github:   { repo: your-org/your-repo }
-        vercel:   { project: your-production-vercel-project }
-        supabase: { project_ref: your_production_project_ref }
-        stripe:   { mode: live }
-    memory:
-      - environment: production
-        note: "Production DB writes are blocked by default."
-policy:
-  require_approval: [ vercel.deploy, vercel.env.write, supabase.write, stripe.write ]
-  block:            [ supabase.destructive_sql, provider.delete ]
-```
-
-You can also build state imperatively without a config file:
-`offlocal project create`, `offlocal env add`, `offlocal map <provider> <env> --resource '<json>'`.
-
-`require_approval` entries apply to **production** (staging/dev keep permissive
-defaults so they stay usable); `block` entries apply **everywhere**.
-
-## Provider environment variables
-
-Set only the providers you use. Tokens are read at call time and never persisted.
+### Step 2 — Provider tokens
 
 | Variable | Provider | Notes |
 |---|---|---|
@@ -134,59 +122,56 @@ Set only the providers you use. Tokens are read at call time and never persisted
 | `SUPABASE_ACCESS_TOKEN` | Supabase | Personal access token |
 | `STRIPE_TEST_SECRET_KEY` | Stripe | `sk_test_...` |
 | `STRIPE_LIVE_SECRET_KEY` | Stripe | `sk_live_...` — only used when policy allows a live write |
-| `RAILWAY_TOKEN` | Railway | Account/workspace token (GraphQL API) |
+| `RAILWAY_TOKEN` | Railway | Account/workspace token |
 
-## Connect the MCP server
+### Step 3 — Let the agent set up your project (no YAML)
 
-**Claude Code** — project-scoped `.mcp.json`:
+The **first time** you connect there are no projects yet — that's expected. You
+don't create them by hand or edit any file; you just ask your agent, and it calls
+the setup tools for you. For example:
 
-```json
-{
-  "mcpServers": {
-    "offlocalai": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["./dist/index.js"],
-      "env": {
-        "GITHUB_TOKEN": "${GITHUB_TOKEN}",
-        "VERCEL_TOKEN": "${VERCEL_TOKEN}",
-        "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}",
-        "STRIPE_TEST_SECRET_KEY": "${STRIPE_TEST_SECRET_KEY}",
-        "STRIPE_LIVE_SECRET_KEY": "${STRIPE_LIVE_SECRET_KEY}",
-        "RAILWAY_TOKEN": "${RAILWAY_TOKEN}"
-      }
-    }
-  }
-}
+> "Use offlocal to create a project called **acme-crm** with a **staging** and a
+> **production** environment. Map my Vercel project **acme-crm-preview** to
+> staging and **acme-crm-prod** to production, and map Railway project
+> **`<railway-project-id>`** to production."
+
+Then start asking it to do real work:
+
+> "What's safe to touch in acme-crm staging?"
+> "Fetch the latest staging logs."
+> "Deploy acme-crm to Railway staging."
+
+Behind the scenes the agent uses `create_project`, `add_environment`,
+`map_provider_resource`, `get_project_context`, and the provider tools — all
+gated by policy and written to the audit log. Your setup persists in a local
+`.offlocal/` directory (in the agent's working directory; override with the
+`OFFLOCAL_HOME` env var), so you only do Step 3 once per machine.
+
+That's the whole setup. **You never have to write a config file.**
+
+### Optional — declare everything in a config file instead
+
+If you'd rather keep your setup as a version-controlled, repeatable file (handy
+for seeding several projects at once or sharing across a team), you *can* describe
+it in `.offlocal/config.yaml` and seed it with the bundled CLI — but this is
+entirely optional and most people can skip it:
+
+```bash
+npx -p @offlocal/mcp offlocal init        # seeds from .offlocal/config.yaml if present
+npx -p @offlocal/mcp offlocal context acme-crm --env staging
 ```
 
-Or: `claude mcp add --transport stdio offlocalai --env GITHUB_TOKEN=... -- node ./dist/index.js`
+See [`.offlocal/config.example.yaml`](.offlocal/config.example.yaml) for the full
+schema. `require_approval` entries apply to **production** (staging/dev stay
+permissive); `block` entries apply **everywhere**.
 
-**Cursor** — `.cursor/mcp.json`:
+### Want zero setup?
 
-```json
-{
-  "mcpServers": {
-    "offlocalai": {
-      "command": "node",
-      "args": ["./dist/index.js"],
-      "env": { "GITHUB_TOKEN": "xxx" }
-    }
-  }
-}
-```
-
-**Codex** — `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.offlocalai]
-command = "node"
-args = ["./dist/index.js"]
-env = { GITHUB_TOKEN = "xxx" }
-```
-
-The server reads `.offlocal/` from the current working directory (override with
-`OFFLOCAL_HOME`).
+The self-hosted core in this repo is free and Apache-2.0 — you bring your own
+provider tokens and run it locally. A **managed** offering (hosted credential
+vault, one-click provider connect, real approve/deny workflows, an audit
+dashboard, and team seats) removes the manual steps above for teams that want it.
+See [offlocal.ai](https://offlocal.ai).
 
 ---
 
@@ -235,7 +220,7 @@ or are blocked — see below).
 
 ## Fetch app logs
 
-Ask the agent something like *"Use offlocalai to fetch the latest staging logs."*
+Ask the agent something like *"Use offlocal to fetch the latest staging logs."*
 It resolves the project/environment, finds the mapped Vercel project, fetches the
 latest deployment's logs, and the read is written to the audit log.
 
@@ -345,19 +330,39 @@ because DATABASE_URL was missing."*
 
 ---
 
-## CLI
+## CLI (optional)
 
-The MCP tools are the primary interface; the `offlocal` CLI is for setup/inspection:
+The MCP tools are the primary interface and most people never need the CLI — your
+agent does setup and inspection for you (Step 3 above). The `offlocal` CLI exists
+for scripting or seeding from a config file:
 
 ```bash
-offlocal init                                   # seed from .offlocal/config.yaml
-offlocal project create "Your Project"
-offlocal env add staging --kind staging
-offlocal map github staging --resource '{"owner":"your-org","repo":"your-repo"}'
-offlocal context your-project
+npx -p @offlocal/mcp offlocal init                # seed from .offlocal/config.yaml
+npx -p @offlocal/mcp offlocal project create "Acme CRM"
+npx -p @offlocal/mcp offlocal env add staging --kind staging
+npx -p @offlocal/mcp offlocal map railway staging --resource '{"projectId":"<id>"}'
+npx -p @offlocal/mcp offlocal context acme-crm --env staging
 ```
 
-(Use `node dist/cli.js ...` before publishing, or `npm run cli -- ...` in dev.)
+Installed globally (`npm i -g @offlocal/mcp`), drop the `npx -p @offlocal/mcp`
+prefix and just run `offlocal ...`.
+
+---
+
+## Develop from source
+
+Contributing or running an unreleased build:
+
+```bash
+git clone https://github.com/adi4x4/offlocalai-mcp && cd offlocalai-mcp
+npm install
+npm run build        # compiles to dist/
+npm test             # full test suite
+npm run typecheck
+```
+
+Then point your agent at the local build with `"command": "node", "args":
+["./dist/index.js"]` instead of the `npx` form above.
 
 ---
 
