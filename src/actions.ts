@@ -1,5 +1,8 @@
 import type { Store } from "./storage.js";
 import { evaluatePolicy } from "./policy.js";
+import { recordDashclawOutcome } from "./dashclaw/evidence.js";
+import { guardWithDashclaw, isRiskyAction, sanitizeDashclawText } from "./dashclaw/guard.js";
+import type { DashclawGuardDecision } from "./dashclaw/types.js";
 import type { ActionContext, AuditResult, PendingApproval, PolicyEffect, ProviderId } from "./types.js";
 import { newId, nowIso } from "./util.js";
 
@@ -16,6 +19,15 @@ import { newId, nowIso } from "./util.js";
  * is never invoked.
  */
 
+export interface DashclawResponseMetadata {
+  decision?: "allow" | "block" | "require_approval";
+  decision_id?: string;
+  action_id?: string;
+  verification_status?: string;
+  outcome_recorded?: boolean;
+  error?: string;
+}
+
 export interface ApprovalRequiredResponse {
   status: "approval_required";
   policy_decision: "approval_required";
@@ -27,6 +39,7 @@ export interface ApprovalRequiredResponse {
   action: string;
   approval_id: string;
   suggested_next_step: string;
+  dashclaw?: DashclawResponseMetadata;
 }
 
 export interface BlockedResponse {
@@ -39,6 +52,7 @@ export interface BlockedResponse {
   provider: ProviderId;
   action: string;
   suggested_next_step: string;
+  dashclaw?: DashclawResponseMetadata;
 }
 
 export interface OkResponse {
@@ -52,6 +66,7 @@ export interface OkResponse {
   mode?: string;
   reason: string;
   data: unknown;
+  dashclaw?: DashclawResponseMetadata;
 }
 
 export interface ErrorResponse {
@@ -63,6 +78,7 @@ export interface ErrorResponse {
   provider: ProviderId;
   action: string;
   error: string;
+  dashclaw?: DashclawResponseMetadata;
 }
 
 export interface PreExecutionErrorResponse {
@@ -74,6 +90,7 @@ export interface PreExecutionErrorResponse {
   provider: ProviderId;
   action: string;
   error: string;
+  dashclaw?: DashclawResponseMetadata;
 }
 
 export type GuardedResponse =
@@ -97,14 +114,32 @@ export async function runGuarded(
   };
 
   const mode = ctx.provider === "stripe" ? ctx.resourceLabel : undefined;
+  const risky = isRiskyAction(ctx);
+  const auditCorrelationId = newId("audit");
 
   try {
     return await store.withAuditLock(async (appendAudit) => {
+      let dashclawDecision: DashclawGuardDecision | undefined;
+
+      const dashclawMeta = (): DashclawResponseMetadata | undefined =>
+        dashclawDecision
+          ? {
+              decision: dashclawDecision.decision,
+              decision_id: dashclawDecision.decisionId,
+              action_id: dashclawDecision.actionId,
+              verification_status: dashclawDecision.verificationStatus,
+            }
+          : undefined;
+
       function audit(result: AuditResult, errorMessage?: string): void {
         auditWithDecision(result, decision.effect, errorMessage);
       }
 
-      function auditWithDecision(result: AuditResult, policyDecision: PolicyEffect, errorMessage?: string): void {
+      function auditWithDecision(
+        result: AuditResult,
+        policyDecision: PolicyEffect,
+        errorMessage?: string,
+      ): void {
         appendAudit({
           timestamp: new Date().toISOString(),
           projectSlug: ctx.project.slug,
@@ -116,7 +151,47 @@ export async function runGuarded(
           result,
           errorMessage,
           providerResource: ctx.resourceLabel,
+          dashclawDecisionId: dashclawDecision?.decisionId,
+          dashclawActionId: dashclawDecision?.actionId,
+          auditCorrelationId,
         });
+      }
+
+      async function recordOutcome(
+        status: "success" | "error" | "not_executed",
+        startedAt: number,
+        errorMessage?: string,
+      ): Promise<boolean> {
+        if (!dashclawDecision?.actionId) return false;
+        return recordDashclawOutcome({
+          actionId: dashclawDecision.actionId,
+          status,
+          durationMs: Date.now() - startedAt,
+          summary: sanitizeDashclawText(ctx.summary),
+          errorMessage: errorMessage ? sanitizeDashclawText(errorMessage) : undefined,
+          metadata: {
+            provider: ctx.provider,
+            capability: ctx.capability,
+            tool: ctx.tool,
+            project: ctx.project.slug,
+            environment: ctx.environment.name,
+            resource_label: ctx.resourceLabel ? sanitizeDashclawText(ctx.resourceLabel) : undefined,
+            audit_correlation_id: auditCorrelationId,
+          },
+        });
+      }
+
+      async function recordOutcomeSafely(
+        status: "success" | "error" | "not_executed",
+        startedAt: number,
+        errorMessage?: string,
+      ): Promise<{ outcomeRecorded?: boolean; outcomeError?: string }> {
+        if (!dashclawDecision) return {};
+        try {
+          return { outcomeRecorded: await recordOutcome(status, startedAt, errorMessage) };
+        } catch (err) {
+          return { outcomeRecorded: false, outcomeError: err instanceof Error ? err.message : String(err) };
+        }
       }
 
       const approvalMatches = (approval: PendingApproval): boolean =>
@@ -128,15 +203,96 @@ export async function runGuarded(
         approval.providerResource === ctx.resourceLabel;
 
       async function executeAllowed(reason: string): Promise<OkResponse | ErrorResponse> {
+        const startedAt = Date.now();
         try {
           const data = await exec();
           auditWithDecision("success", "allow");
-          return { ...base, status: "ok", policy_decision: "allow", executed: true, mode, reason, data };
+          const { outcomeRecorded, outcomeError } = await recordOutcomeSafely("success", startedAt);
+          return {
+            ...base,
+            status: "ok",
+            policy_decision: "allow",
+            executed: true,
+            mode,
+            reason,
+            data,
+            dashclaw: dashclawDecision ? { ...dashclawMeta(), outcome_recorded: outcomeRecorded, error: outcomeError } : undefined,
+          };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           auditWithDecision("error", "allow", message);
-          return { ...base, status: "error", policy_decision: "allow", executed: true, error: message };
+          const { outcomeRecorded, outcomeError } = await recordOutcomeSafely("error", startedAt, message);
+          return {
+            ...base,
+            status: "error",
+            policy_decision: "allow",
+            executed: true,
+            error: message,
+            dashclaw: dashclawDecision ? { ...dashclawMeta(), outcome_recorded: outcomeRecorded, error: outcomeError } : undefined,
+          };
         }
+      }
+
+      if (risky) {
+        const startedAt = Date.now();
+        try {
+          dashclawDecision = await guardWithDashclaw(store, ctx, auditCorrelationId);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          appendAudit({
+            timestamp: new Date().toISOString(),
+            projectSlug: ctx.project.slug,
+            environment: ctx.environment.name,
+            provider: ctx.provider,
+            tool: ctx.tool,
+            actionSummary: ctx.summary,
+            policyDecision: decision.effect,
+            result: "not_executed",
+            errorMessage: `DashClaw unavailable; refusing risky action. ${message}`,
+            providerResource: ctx.resourceLabel,
+            dashclawError: message,
+            auditCorrelationId,
+          });
+          return {
+            ...base,
+            status: "error",
+            policy_decision: decision.effect,
+            executed: false,
+            error: `DashClaw unavailable; refusing risky action. ${message}`,
+            dashclaw: { error: message },
+          };
+        }
+
+        if (dashclawDecision.decision === "block") {
+          auditWithDecision("not_executed", "block");
+          const { outcomeRecorded, outcomeError } = await recordOutcomeSafely("not_executed", startedAt, dashclawDecision.reason);
+          return {
+            ...base,
+            status: "blocked",
+            policy_decision: "block",
+            executed: false,
+            reason: dashclawDecision.reason,
+            suggested_next_step: "DashClaw blocked this action. Review DashClaw guard decisions before retrying.",
+            dashclaw: { ...dashclawMeta(), outcome_recorded: outcomeRecorded, error: outcomeError },
+          };
+        }
+
+        if (dashclawDecision.decision === "require_approval") {
+          auditWithDecision("not_executed", "approval_required");
+          const { outcomeRecorded, outcomeError } = await recordOutcomeSafely("not_executed", startedAt, dashclawDecision.reason);
+          return {
+            ...base,
+            status: "approval_required",
+            policy_decision: "approval_required",
+            executed: false,
+            approval_id: dashclawDecision.actionId ?? dashclawDecision.decisionId ?? "dashclaw",
+            reason: dashclawDecision.reason,
+            suggested_next_step: "DashClaw requires approval. Use DashClaw approval tooling, then rerun the original action.",
+            dashclaw: { ...dashclawMeta(), outcome_recorded: outcomeRecorded, error: outcomeError },
+          };
+        }
+
+        return executeAllowed(dashclawDecision.reason);
       }
 
       if (decision.effect === "block") {

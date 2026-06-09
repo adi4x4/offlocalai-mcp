@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync } from "node:fs";
 import { freshStore, seedAcme } from "./helpers.js";
 import * as pa from "../src/provider-actions.js";
-import { approveAction, listAuditLog, listPendingApprovals, mapProviderResource, rejectAction } from "../src/service.js";
+import { listAuditLog, listPendingApprovals, mapProviderResource } from "../src/service.js";
 import type { Store } from "../src/storage.js";
 
 /**
@@ -14,6 +14,7 @@ import type { Store } from "../src/storage.js";
  */
 
 let fetchMock: ReturnType<typeof vi.fn>;
+let dashclawDecision: Record<string, unknown>;
 
 function mockOk(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -22,8 +23,34 @@ function mockOk(body: unknown) {
   });
 }
 
+function dashclawRoute(url: string): Response | undefined {
+  if (url === "https://dashclaw.example/api/guard") {
+    return mockOk(dashclawDecision);
+  }
+  if (url.startsWith("https://dashclaw.example/api/actions/") && url.endsWith("/outcome")) {
+    return mockOk({ ok: true });
+  }
+  return undefined;
+}
+
+function withDashclawRoute(providerRoute: (url: string, init?: any) => Response | Promise<Response>) {
+  return async (url: string, init?: any) => dashclawRoute(url) ?? providerRoute(url, init);
+}
+
+function setDashclawDecision(decision: "allow" | "block" | "require_approval", suffix = decision) {
+  dashclawDecision = {
+    decision,
+    reason: `DashClaw ${decision}`,
+    decision_id: `gd_${suffix}`,
+    action_id: `act_${suffix}`,
+  };
+}
+
 beforeEach(() => {
-  fetchMock = vi.fn(async () => mockOk({ id: "obj_123", name: "Test", active: true, created: 1 }));
+  process.env.DASHCLAW_BASE_URL = "https://dashclaw.example";
+  process.env.DASHCLAW_API_KEY = "dc_test";
+  setDashclawDecision("allow");
+  fetchMock = vi.fn(withDashclawRoute(() => mockOk({ id: "obj_123", name: "Test", active: true, created: 1 })));
   vi.stubGlobal("fetch", fetchMock);
   process.env.STRIPE_TEST_SECRET_KEY = "sk_test_dummy";
   process.env.STRIPE_LIVE_SECRET_KEY = "sk_live_dummy";
@@ -38,10 +65,16 @@ afterEach(() => {
   delete process.env.GITHUB_TOKEN;
   delete process.env.CUSTOM_VERCEL_TOKEN;
   delete process.env.CUSTOM_STRIPE_TEST_KEY;
+  delete process.env.DASHCLAW_BASE_URL;
+  delete process.env.DASHCLAW_API_KEY;
 });
 
 function lastAudit(store: Store) {
   return listAuditLog(store, { project: "acme-crm" })[0];
+}
+
+function providerCalls() {
+  return fetchMock.mock.calls.filter(([url]) => typeof url === "string" && !url.startsWith("https://dashclaw.example"));
 }
 
 describe("Stripe", () => {
@@ -86,11 +119,12 @@ describe("Stripe", () => {
       name: "Pro Plan",
     });
     expect(res.status).toBe("ok");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(providerCalls()).toHaveLength(1);
     expect(lastAudit(store)).toMatchObject({ result: "success", policyDecision: "allow", provider: "stripe" });
   });
 
   it("requires approval for live-mode writes and does NOT execute them", async () => {
+    setDashclawDecision("require_approval", "stripe_live");
     const store = freshStore();
     seedAcme(store);
     const res = await pa.stripeCreateProduct(store, {
@@ -98,8 +132,14 @@ describe("Stripe", () => {
       name: "Pro Plan",
     });
     expect(res.status).toBe("approval_required");
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(lastAudit(store)).toMatchObject({ result: "not_executed", policyDecision: "approval_required" });
+    expect((res as any).approval_id).toBe("act_stripe_live");
+    expect(providerCalls()).toHaveLength(0);
+    expect(lastAudit(store)).toMatchObject({
+      result: "not_executed",
+      policyDecision: "approval_required",
+      dashclawDecisionId: "gd_stripe_live",
+      dashclawActionId: "act_stripe_live",
+    });
   });
 });
 
@@ -245,68 +285,51 @@ describe("Vercel", () => {
   });
 
   it("requires approval for production deploys and does NOT execute them", async () => {
+    setDashclawDecision("require_approval", "vercel_prod_deploy");
     const store = freshStore();
     seedAcme(store);
     const res = await pa.vercelCreateDeployment(store, { environment: "production" });
     expect(res.status).toBe("approval_required");
-    expect((res as any).approval_id).toMatch(/^approval_/);
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(listPendingApprovals(store, { project: "acme-crm" })).toHaveLength(1);
+    expect((res as any).approval_id).toBe("act_vercel_prod_deploy");
+    expect(providerCalls()).toHaveLength(0);
+    expect(listPendingApprovals(store, { project: "acme-crm" })).toHaveLength(0);
   });
 
-  it("approves exactly one matching production deploy rerun", async () => {
+  it("executes a production deploy when DashClaw allows it", async () => {
+    const store = freshStore();
+    seedAcme(store);
+
+    const res = await pa.vercelCreateDeployment(store, { environment: "production" });
+
+    expect(res.status).toBe("ok");
+    expect(providerCalls()).toHaveLength(1);
+    expect(listPendingApprovals(store, { project: "acme-crm" })).toHaveLength(0);
+    expect(lastAudit(store)).toMatchObject({
+      result: "success",
+      policyDecision: "allow",
+      dashclawDecisionId: "gd_allow",
+      dashclawActionId: "act_allow",
+      auditCorrelationId: expect.stringMatching(/^audit_/),
+    });
+    expect((res as any).dashclaw).toMatchObject({ outcome_recorded: true });
+  });
+
+  it("keeps production deploys gated while DashClaw requires approval", async () => {
+    setDashclawDecision("require_approval", "vercel_retry");
     const store = freshStore();
     seedAcme(store);
     const gated = await pa.vercelCreateDeployment(store, { environment: "production" });
     expect(gated.status).toBe("approval_required");
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    const approved = approveAction(store, {
-      approvalId: (gated as any).approval_id,
-      note: "Reviewed deployment plan.",
-    });
-    expect(approved.approval.status).toBe("approved");
-    expect(lastAudit(store)).toMatchObject({
-      provider: "core",
-      tool: "approve_action",
-      result: "success",
-      policyDecision: "n/a",
-    });
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    const rerun = await pa.vercelCreateDeployment(store, { environment: "production" });
-    expect(rerun.status).toBe("ok");
-    expect(listPendingApprovals(store, { status: "used" as any })[0]).toMatchObject({
-      id: (gated as any).approval_id,
-      status: "used",
-    });
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-
-    const secondRerun = await pa.vercelCreateDeployment(store, { environment: "production" });
-    expect(secondRerun.status).toBe("approval_required");
-    expect((secondRerun as any).approval_id).not.toBe((gated as any).approval_id);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects a pending approval and keeps the production action gated", async () => {
-    const store = freshStore();
-    seedAcme(store);
-    const gated = await pa.vercelCreateDeployment(store, { environment: "production" });
-    rejectAction(store, { approvalId: (gated as any).approval_id, note: "Not safe yet." });
-    expect(lastAudit(store)).toMatchObject({
-      provider: "core",
-      tool: "reject_action",
-      result: "not_executed",
-      policyDecision: "n/a",
-    });
 
     const rerun = await pa.vercelCreateDeployment(store, { environment: "production" });
     expect(rerun.status).toBe("approval_required");
-    expect((rerun as any).approval_id).not.toBe((gated as any).approval_id);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect((rerun as any).approval_id).toBe("act_vercel_retry");
+    expect(providerCalls()).toHaveLength(0);
+    expect(listPendingApprovals(store, { project: "acme-crm" })).toHaveLength(0);
   });
 
   it("requires approval for production env-var changes", async () => {
+    setDashclawDecision("require_approval", "vercel_env");
     const store = freshStore();
     seedAcme(store);
     const res = await pa.vercelSetEnvVar(store, {
@@ -315,7 +338,7 @@ describe("Vercel", () => {
       value: "postgres://...",
     });
     expect(res.status).toBe("approval_required");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 
   it("rejects empty env-var keys before calling Vercel", async () => {
@@ -328,7 +351,7 @@ describe("Vercel", () => {
     });
     expect(res.status).toBe("error");
     expect((res as any).error).toMatch(/key/i);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 
   it("allows and executes a non-production (preview) deploy", async () => {
@@ -336,7 +359,7 @@ describe("Vercel", () => {
     seedAcme(store);
     const res = await pa.vercelCreateDeployment(store, { environment: "staging" });
     expect(res.status).toBe("ok");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(providerCalls()).toHaveLength(1);
   });
 
   it("does not execute an allowed provider action when the audit log cannot be reserved", async () => {
@@ -599,44 +622,51 @@ describe("Railway writes", () => {
     const store = freshStore();
     seedAcme(store);
     mapRailwayTo(store, "staging");
-    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    fetchMock.mockImplementation(withDashclawRoute((url: string, init: any) => routeMutations()(url, init)));
     const res = await pa.railwayCreateDeployment(store, { environment: "staging" });
     expect(res.status).toBe("ok");
     expect((res as any).data.deploymentId).toBe("rw_dpl_new");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(providerCalls()).toHaveLength(1);
     expect(lastAudit(store)).toMatchObject({ result: "success", provider: "railway", tool: "create_railway_deployment" });
   });
 
   it("requires approval for a production deploy and does NOT execute", async () => {
+    setDashclawDecision("require_approval", "railway_prod_deploy");
     const store = freshStore();
     seedAcme(store);
     mapRailwayTo(store, "production");
-    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    fetchMock.mockImplementation(withDashclawRoute((url: string, init: any) => routeMutations()(url, init)));
     const res = await pa.railwayCreateDeployment(store, { environment: "production" });
     expect(res.status).toBe("approval_required");
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(lastAudit(store)).toMatchObject({ result: "not_executed", policyDecision: "approval_required" });
+    expect(providerCalls()).toHaveLength(0);
+    expect(lastAudit(store)).toMatchObject({
+      result: "not_executed",
+      policyDecision: "approval_required",
+      dashclawDecisionId: "gd_railway_prod_deploy",
+      dashclawActionId: "act_railway_prod_deploy",
+    });
   });
 
   it("requires approval for a production variable change and does NOT execute", async () => {
+    setDashclawDecision("require_approval", "railway_prod_var");
     const store = freshStore();
     seedAcme(store);
     mapRailwayTo(store, "production");
-    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    fetchMock.mockImplementation(withDashclawRoute((url: string, init: any) => routeMutations()(url, init)));
     const res = await pa.railwaySetEnvVar(store, { environment: "production", key: "DATABASE_URL", value: "postgres://..." });
     expect(res.status).toBe("approval_required");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 
   it("allows and executes a staging variable change", async () => {
     const store = freshStore();
     seedAcme(store);
     mapRailwayTo(store, "staging");
-    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    fetchMock.mockImplementation(withDashclawRoute((url: string, init: any) => routeMutations()(url, init)));
     const res = await pa.railwaySetEnvVar(store, { environment: "staging", key: "FEATURE_FLAG", value: "on" });
     expect(res.status).toBe("ok");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(providerCalls()).toHaveLength(1);
+    const body = JSON.parse((providerCalls()[0]![1] as RequestInit).body as string);
     expect(body.variables.input).toMatchObject({ name: "FEATURE_FLAG", value: "on", environmentId: "rw_env_1" });
   });
 
@@ -644,25 +674,32 @@ describe("Railway writes", () => {
     const store = freshStore();
     seedAcme(store);
     mapRailwayTo(store, "staging");
-    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    fetchMock.mockImplementation(withDashclawRoute((url: string, init: any) => routeMutations()(url, init)));
     const res = await pa.railwaySetEnvVar(store, { environment: "staging", key: " ", value: "on" });
     expect(res.status).toBe("error");
     expect((res as any).error).toMatch(/key/i);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 });
 
 describe("Supabase", () => {
   it("blocks destructive SQL everywhere and does NOT execute", async () => {
+    setDashclawDecision("block", "supabase_destructive");
     const store = freshStore();
     seedAcme(store);
     const res = await pa.supabaseQuery(store, { environment: "staging", sql: "DROP TABLE users" });
     expect(res.status).toBe("blocked");
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(lastAudit(store)).toMatchObject({ result: "not_executed", policyDecision: "block" });
+    expect(providerCalls()).toHaveLength(0);
+    expect(lastAudit(store)).toMatchObject({
+      result: "not_executed",
+      policyDecision: "block",
+      dashclawDecisionId: "gd_supabase_destructive",
+      dashclawActionId: "act_supabase_destructive",
+    });
   });
 
   it("requires approval for a production DB write and does NOT execute", async () => {
+    setDashclawDecision("require_approval", "supabase_prod_write");
     const store = freshStore();
     seedAcme(store);
     const res = await pa.supabaseQuery(store, {
@@ -670,7 +707,7 @@ describe("Supabase", () => {
       sql: "INSERT INTO users (id) VALUES (1)",
     });
     expect(res.status).toBe("approval_required");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 
   it("allows a read-only SELECT and sends read_only=true", async () => {
@@ -679,8 +716,8 @@ describe("Supabase", () => {
     fetchMock.mockResolvedValueOnce(mockOk([{ count: 5 }]));
     const res = await pa.supabaseQuery(store, { environment: "production", sql: "SELECT count(*) FROM users" });
     expect(res.status).toBe("ok");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(providerCalls()).toHaveLength(1);
+    const body = JSON.parse((providerCalls()[0]![1] as RequestInit).body as string);
     expect(body.read_only).toBe(true);
   });
 
@@ -690,7 +727,7 @@ describe("Supabase", () => {
     const res = await pa.supabaseQuery(store, { environment: "staging", sql: "   " });
     expect(res.status).toBe("error");
     expect((res as any).error).toMatch(/sql/i);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 });
 
@@ -716,7 +753,7 @@ describe("Stripe price validation", () => {
     });
     expect(res.status).toBe("error");
     expect((res as any).error).toMatch(/name/i);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 
   it("rejects non-positive price amounts before calling Stripe", async () => {
@@ -730,6 +767,6 @@ describe("Stripe price validation", () => {
     });
     expect(res.status).toBe("error");
     expect((res as any).error).toMatch(/unitAmount/i);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(providerCalls()).toHaveLength(0);
   });
 });

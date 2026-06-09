@@ -50,7 +50,7 @@ function isReversible(ctx: ActionContext): boolean {
   return true;
 }
 
-function redactRiskContext(value: string): string {
+export function sanitizeDashclawText(value: string): string {
   return value
     .replace(
       /\b(?:[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_TOKEN|DATABASE_URL)[A-Z0-9_]*)\s*=\s*[^\s,;}]+/gi,
@@ -65,7 +65,7 @@ function redactRiskContext(value: string): string {
 }
 
 function safeOptionalString(value: string | undefined): string | undefined {
-  return value === undefined ? undefined : redactRiskContext(value);
+  return value === undefined ? undefined : sanitizeDashclawText(value);
 }
 
 function systemsTouched(ctx: ActionContext): string[] {
@@ -80,7 +80,7 @@ export function buildDashclawGuardPayload(
 ): DashclawGuardPayload {
   return {
     action_type: actionType(ctx),
-    declared_goal: redactRiskContext(ctx.summary),
+    declared_goal: sanitizeDashclawText(ctx.summary),
     systems_touched: systemsTouched(ctx),
     reversible: isReversible(ctx),
     risk_score: riskScore(ctx),
@@ -97,7 +97,7 @@ export function buildDashclawGuardPayload(
       tool: ctx.tool,
       resource_label: safeOptionalString(ctx.resourceLabel),
       local_policy_effect: localPreview.effect,
-      local_policy_reason: redactRiskContext(localPreview.reason),
+      local_policy_reason: sanitizeDashclawText(localPreview.reason),
       local_policy_source: localPreview.source,
       live: ctx.live === true,
       audit_correlation_id: auditCorrelationId,

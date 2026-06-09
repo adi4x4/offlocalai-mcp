@@ -700,7 +700,7 @@ git commit -m "feat: include dashclaw metadata in audit exports"
 - Create: `src/dashclaw/evidence.ts`
 - Modify: `test/actions.test.ts`
 
-- [ ] **Step 1: Add failing `runGuarded()` DashClaw tests**
+- [x] **Step 1: Add failing `runGuarded()` DashClaw tests**
 
 Append to `test/actions.test.ts`:
 
@@ -832,7 +832,7 @@ Also update the first import in `test/actions.test.ts`:
 import { afterEach, describe, expect, it, vi } from "vitest";
 ```
 
-- [ ] **Step 2: Run tests and verify failures**
+- [x] **Step 2: Run tests and verify failures**
 
 Run:
 
@@ -842,7 +842,7 @@ npm test -- test/actions.test.ts
 
 Expected: fail because `runGuarded()` does not call DashClaw and response types do not include `dashclaw`.
 
-- [ ] **Step 3: Extend response types with DashClaw metadata**
+- [x] **Step 3: Extend response types with DashClaw metadata**
 
 In `src/actions.ts`, add this interface near response interfaces:
 
@@ -859,7 +859,7 @@ export interface DashclawResponseMetadata {
 
 Add `dashclaw?: DashclawResponseMetadata;` to `ApprovalRequiredResponse`, `BlockedResponse`, `OkResponse`, `ErrorResponse`, and `PreExecutionErrorResponse`.
 
-- [ ] **Step 4: Add outcome recording helper**
+- [x] **Step 4: Add outcome recording helper**
 
 Create `src/dashclaw/evidence.ts`:
 
@@ -882,7 +882,7 @@ export async function recordDashclawOutcome(input: DashclawOutcomeInput): Promis
 }
 ```
 
-- [ ] **Step 5: Refactor `runGuarded()` to guard risky actions before execution**
+- [x] **Step 5: Refactor `runGuarded()` to guard risky actions before execution**
 
 In `src/actions.ts`, add imports:
 
@@ -1079,7 +1079,7 @@ function auditWithDecision(
 
 Pass `outcomeRecorded` from success/error execution calls.
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 Run:
 
@@ -1090,7 +1090,7 @@ npm run typecheck
 
 Expected: pass. Existing provider tests should still pass because they use risky actions; update test setup to provide DashClaw env and guard mocks only where the action is expected to execute. For tests that assert gated local policy behavior, keep DashClaw disabled and adjust expectations to fail-closed only for risky actions if local policy no longer runs first.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```powershell
 git add src/actions.ts src/dashclaw/evidence.ts src/dashclaw/types.ts test/actions.test.ts test/providers.test.ts
