@@ -4,9 +4,11 @@ import {
   addEnvironment,
   createConnection,
   createProject,
+  dashclawStatus,
   doctor,
   ensureDefaultWorkspace,
   exportAuditLog,
+  exportDashclawEvidence,
   exportContextSnapshot,
   getProjectContext,
   listConnections,
@@ -144,6 +146,8 @@ Usage:
   offlocal simulate <provider> <environment> <capability> [--project <p>] [--live] [--resource <label>]
   offlocal audit export [--project <p>] [--env <e>] [--provider <p>] [--limit <n>] [--format jsonl|csv|markdown]
   offlocal snapshot [--project <p>] [--env <e>] [--format json|markdown]
+  offlocal dashclaw status
+  offlocal dashclaw evidence [--project <p>] [--env <e>] [--provider <p>] [--limit <n>]
   offlocal context [project] [--env <e>] [--json]   Print the production-context summary
 
 Providers: github | vercel | supabase | stripe | railway
@@ -343,6 +347,25 @@ async function main(): Promise<void> {
       const format = (flags.format ?? "json") as "json" | "markdown";
       const store = new Store();
       console.log(await exportContextSnapshot(store, { project: flags.project, environment: flags.env, format }));
+      return;
+    }
+
+    case "dashclaw": {
+      const store = new Store();
+      if (sub === "status") {
+        print({ status: "ok", dashclaw: await dashclawStatus() });
+      } else if (sub === "evidence") {
+        print(
+          exportDashclawEvidence(store, {
+            project: flags.project,
+            environment: flags.env,
+            provider: flags.provider as ProviderId | undefined,
+            limit: optionalPositiveInt(flags.limit, "--limit"),
+          }),
+        );
+      } else {
+        failCli("Unknown dashclaw subcommand. Try: status | evidence");
+      }
       return;
     }
 

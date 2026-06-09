@@ -9,9 +9,14 @@ function tempHome() {
 }
 
 function runCli(args: string[], offlocalHome = tempHome()) {
+  const env = { ...process.env, OFFLOCAL_HOME: offlocalHome };
+  delete env.DASHCLAW_BASE_URL;
+  delete env.DASHCLAW_API_KEY;
+  delete env.DASHCLAW_TIMEOUT_MS;
+  delete env.OFFLOCAL_DASHCLAW_MODE;
   const result = spawnSync(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
     cwd: process.cwd(),
-    env: { ...process.env, OFFLOCAL_HOME: offlocalHome },
+    env,
     encoding: "utf8",
   });
   return { ...result, offlocalHome };
@@ -163,6 +168,42 @@ describe("CLI failure behavior", () => {
         project: { slug: "acme-crm" },
         focusedEnvironment: "staging",
       },
+    });
+  });
+
+  it("prints DashClaw status from the CLI", () => {
+    const res = runCli(["dashclaw", "status"]);
+
+    expect(res.status).toBe(0);
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      status: "ok",
+      dashclaw: expect.objectContaining({ configured: false, reachable: false }),
+    });
+  });
+
+  it("exports DashClaw evidence from the CLI", () => {
+    const offlocalHome = createMappedProjectHome();
+    writeFileSync(
+      join(offlocalHome, "audit.log"),
+      JSON.stringify({
+        timestamp: "2026-06-09T00:00:00.000Z",
+        projectSlug: "acme-crm",
+        environment: "staging",
+        provider: "vercel",
+        tool: "create_vercel_deployment",
+        actionSummary: "deploy",
+        policyDecision: "approval_required",
+        result: "not_executed",
+        dashclawDecisionId: "gd_1",
+      }) + "\n",
+    );
+
+    const res = runCli(["dashclaw", "evidence", "--project", "acme-crm"], offlocalHome);
+
+    expect(res.status).toBe(0);
+    expect(JSON.parse(res.stdout)).toMatchObject({
+      schema: "offlocal.dashclaw.evidence.v1",
+      entries: [expect.objectContaining({ dashclawDecisionId: "gd_1" })],
     });
   });
 

@@ -1366,7 +1366,7 @@ git commit -m "feat: add dashclaw operational services"
 - Modify: `test/tools.test.ts`
 - Modify: `test/cli.test.ts`
 
-- [ ] **Step 1: Add failing MCP schema tests**
+- [x] **Step 1: Add failing MCP schema tests**
 
 In `test/tools.test.ts`, add expectations to the operational readiness tool test:
 
@@ -1380,7 +1380,7 @@ In `test/tools.test.ts`, add expectations to the operational readiness tool test
     expect(inputSchema("explain_action_risk").capability.safeParse("deploy").success).toBe(true);
 ```
 
-- [ ] **Step 2: Add failing CLI tests**
+- [x] **Step 2: Add failing CLI tests**
 
 Append to `test/cli.test.ts`:
 
@@ -1422,7 +1422,7 @@ Append to `test/cli.test.ts`:
   });
 ```
 
-- [ ] **Step 3: Run tests and verify failures**
+- [x] **Step 3: Run tests and verify failures**
 
 Run:
 
@@ -1432,7 +1432,7 @@ npm test -- test/tools.test.ts test/cli.test.ts
 
 Expected: fail because MCP tools and CLI subcommands are missing.
 
-- [ ] **Step 4: Register MCP tools**
+- [x] **Step 4: Register MCP tools**
 
 In `src/tools/index.ts`, register these before `registerProviderTools(server, store);`:
 
@@ -1517,7 +1517,7 @@ In `src/tools/index.ts`, register these before `registerProviderTools(server, st
   );
 ```
 
-- [ ] **Step 5: Add CLI commands**
+- [x] **Step 5: Add CLI commands**
 
 In `src/cli.ts`, import:
 
@@ -1556,7 +1556,7 @@ Add a switch case before `context`:
     }
 ```
 
-- [ ] **Step 6: Run transport tests and commit**
+- [x] **Step 6: Run transport tests and commit**
 
 Run:
 

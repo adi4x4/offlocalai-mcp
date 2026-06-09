@@ -460,6 +460,85 @@ export function registerTools(server: McpServer, store: Store): void {
     ),
   );
 
+  server.registerTool(
+    "dashclaw_status",
+    {
+      title: "DashClaw status",
+      description: "Check DashClaw authoritative gate configuration and reachability.",
+      inputSchema: {},
+    },
+    guard(async () => ({ status: "ok", dashclaw: await svc.dashclawStatus() })),
+  );
+
+  server.registerTool(
+    "dashclaw_recent_decisions",
+    {
+      title: "DashClaw recent decisions",
+      description: "Read recent DashClaw guard decisions scoped to project/environment when supported by DashClaw.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        environment: optionalNonEmptyString(),
+        limit: positiveInt().optional(),
+      },
+    },
+    guard((a: { project?: string; environment?: string; limit?: number }) => svc.dashclawRecentDecisions(store, a)),
+  );
+
+  server.registerTool(
+    "export_dashclaw_evidence",
+    {
+      title: "Export DashClaw evidence",
+      description: "Export local audit entries that include DashClaw guard/evidence metadata.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        environment: optionalNonEmptyString(),
+        provider: provider.optional(),
+        limit: positiveInt().optional(),
+      },
+    },
+    guard((a: { project?: string; environment?: string; provider?: (typeof PROVIDER_IDS)[number]; limit?: number }) => ({
+      status: "ok",
+      evidence: svc.exportDashclawEvidence(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "explain_action_risk",
+    {
+      title: "Explain action risk",
+      description: "Dry-run local policy and DashClaw guard context for a provider action without executing it.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        environment: nonEmptyString(),
+        provider,
+        capability,
+        tool: nonEmptyString(),
+        summary: nonEmptyString(),
+        resourceLabel: optionalNonEmptyString(),
+        live: z.boolean().optional(),
+      },
+    },
+    guard((a: any) => svc.explainActionRisk(store, a)),
+  );
+
+  server.registerTool(
+    "governed_action_summary",
+    {
+      title: "Governed action summary",
+      description: "Summarize recent local audit entries with DashClaw correlation fields.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        environment: optionalNonEmptyString(),
+        provider: provider.optional(),
+        limit: positiveInt().optional(),
+      },
+    },
+    guard((a: { project?: string; environment?: string; provider?: (typeof PROVIDER_IDS)[number]; limit?: number }) => ({
+      status: "ok",
+      summary: svc.governedActionSummary(store, a),
+    })),
+  );
+
   registerProviderTools(server, store);
 }
 

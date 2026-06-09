@@ -64,10 +64,17 @@ describe("MCP tool schemas", () => {
     expect(tools.has("create_connection")).toBe(true);
     expect(tools.has("simulate_action")).toBe(true);
     expect(tools.has("export_audit_log")).toBe(true);
+    expect(tools.has("dashclaw_status")).toBe(true);
+    expect(tools.has("dashclaw_recent_decisions")).toBe(true);
+    expect(tools.has("export_dashclaw_evidence")).toBe(true);
+    expect(tools.has("explain_action_risk")).toBe(true);
+    expect(tools.has("governed_action_summary")).toBe(true);
     expect(inputSchema("export_audit_log").format.safeParse("markdown").success).toBe(true);
     expect(inputSchema("export_audit_log").format.safeParse("xml").success).toBe(false);
     expect(inputSchema("export_context").format.safeParse("json").success).toBe(true);
     expect(inputSchema("export_context").format.safeParse("xml").success).toBe(false);
+    expect(inputSchema("dashclaw_recent_decisions").limit.safeParse(0).success).toBe(false);
+    expect(inputSchema("explain_action_risk").capability.safeParse("deploy").success).toBe(true);
     expect(tools.has("list_github_pull_requests")).toBe(true);
     expect(tools.has("list_github_branches")).toBe(true);
     expect(tools.has("get_github_status_checks")).toBe(true);
