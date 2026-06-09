@@ -36,7 +36,7 @@
 - Create: `src/dashclaw/client.ts`
 - Create: `test/dashclaw.test.ts`
 
-- [ ] **Step 1: Write failing adapter tests**
+- [x] **Step 1: Write failing adapter tests**
 
 Add this initial test block to `test/dashclaw.test.ts`:
 
@@ -110,7 +110,7 @@ describe("DashClaw decision normalization", () => {
 });
 ```
 
-- [ ] **Step 2: Run the adapter tests and verify they fail**
+- [x] **Step 2: Run the adapter tests and verify they fail**
 
 Run:
 
@@ -120,7 +120,7 @@ npm test -- test/dashclaw.test.ts
 
 Expected: fail because `src/dashclaw/client.ts` and `src/dashclaw/guard.ts` do not exist.
 
-- [ ] **Step 3: Add DashClaw types**
+- [x] **Step 3: Add DashClaw types**
 
 Create `src/dashclaw/types.ts`:
 
@@ -171,7 +171,7 @@ export interface DashclawStatusReport {
 }
 ```
 
-- [ ] **Step 4: Add the DashClaw HTTP client**
+- [x] **Step 4: Add the DashClaw HTTP client**
 
 Create `src/dashclaw/client.ts`:
 
@@ -260,7 +260,7 @@ function safeJson(text: string): unknown {
 }
 ```
 
-- [ ] **Step 5: Add initial decision normalizer**
+- [x] **Step 5: Add initial decision normalizer**
 
 Create `src/dashclaw/guard.ts`:
 
@@ -276,7 +276,7 @@ export function normalizeDashclawDecision(value: unknown): DashclawDecision {
 }
 ```
 
-- [ ] **Step 6: Run tests and commit**
+- [x] **Step 6: Run tests and commit**
 
 Run:
 
