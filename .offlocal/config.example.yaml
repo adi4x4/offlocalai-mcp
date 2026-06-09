@@ -5,7 +5,7 @@
 # account/resource each environment uses → what policy permits. Secrets are
 # NEVER stored here; tokens are read from environment variables at call time
 # (GITHUB_TOKEN, VERCEL_TOKEN, VERCEL_TEAM_ID?, SUPABASE_ACCESS_TOKEN,
-# STRIPE_TEST_SECRET_KEY, STRIPE_LIVE_SECRET_KEY).
+# STRIPE_TEST_SECRET_KEY, STRIPE_LIVE_SECRET_KEY, RAILWAY_TOKEN).
 
 projects:
   # The key is your project's id-safe slug. Add one block per project.
@@ -31,6 +31,11 @@ projects:
           project_ref: your_production_project_ref
         stripe:
           mode: live
+        # Optional: a Railway project (use ids from the Railway dashboard/API).
+        railway:
+          project_id: your-railway-project-id
+          environment_id: your-railway-environment-id   # optional
+          service_id: your-railway-service-id           # optional
     # Optional notes future agent sessions should know. Surfaced in get_project_context.
     memory:
       - environment: production
@@ -46,6 +51,8 @@ policy:
   require_approval:
     - vercel.deploy
     - vercel.env.write
+    - railway.deploy
+    - railway.env.write
     - supabase.write
     - stripe.write
   block:

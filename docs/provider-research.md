@@ -182,6 +182,60 @@ Nested fields use bracket syntax: `recurring[interval]=month`, `product_data[nam
 
 ---
 
+## Railway
+
+_Researched against docs.railway.com (public-api, graphql-overview, manage-deployments). 2026-06-09._
+
+### Base URL, auth & API shape
+- **Endpoint:** `https://backboard.railway.com/graphql/v2` — a single **GraphQL** endpoint (no REST). Every call is `POST` with `{query, variables}`; the rest of our adapters are REST, so Railway gets its own thin `gql()` helper.
+- **Auth (token types):**
+  | Token | Scope | Header |
+  |---|---|---|
+  | Account | all resources/workspaces — personal/local | `Authorization: Bearer <token>` |
+  | Workspace | one workspace — team CI/CD | `Authorization: Bearer <token>` |
+  | Project | one environment in a project | `Project-Access-Token: <token>` |
+  | OAuth | user-granted | `Authorization: Bearer <token>` |
+- **V0 uses an account/workspace token via `Authorization: Bearer` (`RAILWAY_TOKEN`).** Project-token header support is out of scope for V0.
+- **Resource model:** project → environment → service → deployment. A mapping carries `projectId` (required) plus optional `environmentId`/`serviceId` to scope deployment + log reads.
+
+### Key queries
+| Action | Query | Notes |
+|---|---|---|
+| Verify token | `me { id name email }` | account/workspace tokens |
+| Project + topology | `project(id) { name environments{edges{node{id name}}} services{edges{node{id name}}} }` | id is an opaque UUID |
+| List deployments | `deployments(input: DeploymentListInput!, first: Int) { edges{node{id status createdAt url staticUrl}} }` | input: `projectId` (req), `environmentId?`, `serviceId?`; most-recent first |
+| Deployment logs | `deploymentLogs(deploymentId: String!, limit: Int, startDate: DateTime, endDate: DateTime, filter: String) { timestamp message severity }` | runtime logs |
+| Build logs | `buildLogs(deploymentId: String!, limit: Int) { timestamp message severity }` | build-time logs |
+
+### Key mutations (gated by policy)
+| Action | Mutation | Notes |
+|---|---|---|
+| Trigger a deploy | `environmentTriggersDeploy(input: EnvironmentTriggersDeployInput!)` → `String` (id) | input: `projectId`, `environmentId`, `serviceId` |
+| Redeploy | `deploymentRedeploy(id: String!)` → `{ id status }` | redeploy an existing deployment |
+| Upsert variable | `variableUpsert(input: VariableUpsertInput!)` | input: `projectId!`, `environmentId!`, `serviceId?`, `name!`, `value!`, `skipDeploys?` — redeploys affected service unless `skipDeploys: true` |
+| Rollback / restart / remove | `deploymentRollback`/`deploymentRestart`/`deploymentRemove(id: String!)` | not exposed in V0 (`Remove` is a delete → blocked default) |
+
+- **Deployment status enum:** `INITIALIZING`, `BUILDING`, `DEPLOYING`, `SUCCESS`, `FAILED`, `CRASHED`, `REMOVED`, `REMOVING`, `SKIPPED`, `QUEUED`, `WAITING`, `NEEDS_APPROVAL`, `SLEEPING`. Failure states: `FAILED`, `CRASHED`.
+- **Log entry:** `{ timestamp, message, severity }` — we normalize to `{timestamp, level, message}` (severity `err*`→`error`, `warn*`→`warn`, else `info`) and redact secrets.
+
+### GraphQL error handling
+- GraphQL typically returns **HTTP 200 with an `errors[]` array** for query-level failures; auth failures can also be `400/401`. The adapter surfaces both as a clean `OfflocalError` (httpJson throws on non-2xx; `gql()` throws on a non-empty `errors[]`).
+
+### Rate limits
+- Per-hour by plan: Free 100 RPH, Hobby 1,000 (10 RPS), Pro 10,000 (50 RPS), Enterprise custom. Headers: `X-RateLimit-Remaining/Limit/Reset`, `Retry-After`.
+
+### Safe vs dangerous
+- **Safe / read-only:** project context, list deployments, deployment/build logs.
+- **Dangerous (gated like Vercel):** `environmentTriggersDeploy`/`deploymentRedeploy` (deploy), `variableUpsert` (env_change). These flow through `runGuarded` with capability `deploy`/`env_change`, so production requires approval by default. `deploymentRemove` (delete) is not exposed (delete is blocked everywhere by default).
+
+### Limitations / TODOs
+- V0 surface: reads (context, deployments, logs) + **deploy + variable writes** (gated), matching Vercel's surface. Rollback/restart/remove are future work.
+- Project tokens (`Project-Access-Token`) not yet supported — account/workspace token only.
+- `deploymentLogs` returns recent runtime logs; very old logs may be unavailable
+- `variableUpsert` triggers a redeploy of affected services unless `skipDeploys: true` — exposed via the tool's `skip_deploys` arg.
+
+---
+
 ## MCP
 
 ### Overview

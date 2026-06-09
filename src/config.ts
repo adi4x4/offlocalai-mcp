@@ -37,6 +37,7 @@ interface ConfigEnvironment {
   vercel?: { project: string; team_id?: string };
   supabase?: { project_ref: string };
   stripe?: { mode: "test" | "live" };
+  railway?: { project_id: string; environment_id?: string; service_id?: string };
 }
 
 interface ConfigMemory {
@@ -102,6 +103,15 @@ function environmentResource(provider: ProviderId, env: ConfigEnvironment): Prov
       return env.supabase ? { provider, projectRef: env.supabase.project_ref } : null;
     case "stripe":
       return env.stripe ? { provider, mode: env.stripe.mode } : null;
+    case "railway":
+      return env.railway
+        ? {
+            provider,
+            projectId: env.railway.project_id,
+            environmentId: env.railway.environment_id,
+            serviceId: env.railway.service_id,
+          }
+        : null;
   }
 }
 
@@ -113,7 +123,7 @@ export interface SeedResult {
 
 export function applyConfig(store: Store, config: OfflocalConfig): SeedResult {
   const result: SeedResult = { createdProjects: [], skippedProjects: [], createdRules: 0 };
-  const providers: ProviderId[] = ["github", "vercel", "supabase", "stripe"];
+  const providers: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
 
   for (const [slug, p] of Object.entries(config.projects ?? {})) {
     if (store.data.projects.some((x) => x.slug === slug)) {

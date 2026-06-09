@@ -37,6 +37,8 @@ export function defaultEnvVar(provider: string): string {
       return "SUPABASE_ACCESS_TOKEN";
     case "stripe":
       return "STRIPE_TEST_SECRET_KEY";
+    case "railway":
+      return "RAILWAY_TOKEN";
     default:
       return `${provider.toUpperCase()}_TOKEN`;
   }

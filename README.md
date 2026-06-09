@@ -56,7 +56,8 @@ to a provider call that skips this.
 ## Status: V0
 
 - Local-first and **open source** (Apache 2.0). Runs entirely on your machine.
-- Providers: **GitHub, Vercel, Supabase, Stripe** (direct REST APIs).
+- Providers: **GitHub, Vercel, Supabase, Stripe** (direct REST APIs) and
+  **Railway** (GraphQL API).
 - Storage: plain JSON files under `.offlocal/` (zero native deps).
 - Auth: **environment variables only** — tokens are read at call time and never
   written to disk.
@@ -133,6 +134,7 @@ Set only the providers you use. Tokens are read at call time and never persisted
 | `SUPABASE_ACCESS_TOKEN` | Supabase | Personal access token |
 | `STRIPE_TEST_SECRET_KEY` | Stripe | `sk_test_...` |
 | `STRIPE_LIVE_SECRET_KEY` | Stripe | `sk_live_...` — only used when policy allows a live write |
+| `RAILWAY_TOKEN` | Railway | Account/workspace token (GraphQL API) |
 
 ## Connect the MCP server
 
@@ -150,7 +152,8 @@ Set only the providers you use. Tokens are read at call time and never persisted
         "VERCEL_TOKEN": "${VERCEL_TOKEN}",
         "SUPABASE_ACCESS_TOKEN": "${SUPABASE_ACCESS_TOKEN}",
         "STRIPE_TEST_SECRET_KEY": "${STRIPE_TEST_SECRET_KEY}",
-        "STRIPE_LIVE_SECRET_KEY": "${STRIPE_LIVE_SECRET_KEY}"
+        "STRIPE_LIVE_SECRET_KEY": "${STRIPE_LIVE_SECRET_KEY}",
+        "RAILWAY_TOKEN": "${RAILWAY_TOKEN}"
       }
     }
   }
@@ -209,6 +212,9 @@ The server reads `.offlocal/` from the current working directory (override with
 `get_vercel_deployment_status`, `get_vercel_deployment_logs`,
 `set_vercel_env_var`*, `create_vercel_deployment`*
 
+**Railway:** `get_railway_project_context`, `get_railway_deployments`,
+`get_railway_logs`, `create_railway_deployment`*, `set_railway_env_var`*
+
 **Supabase:** `list_supabase_projects`, `get_supabase_project_context`,
 `query_supabase`*
 
@@ -235,11 +241,13 @@ latest deployment's logs, and the read is written to the audit log.
 
 - `get_app_logs` — generic. Pass `project` + `environment` (and optionally
   `provider`, `deployment_id`, `since`, `limit`). With no `provider` it reads
-  every mapped provider that supports logs (Vercel prioritized in V0).
-- `get_vercel_logs` — Vercel-specific. Resolves the latest deployment when
-  `deployment_id` is omitted; returns the deployment id/url/status plus logs.
+  every mapped provider that supports logs (Vercel + Railway in V0, Vercel
+  prioritized).
+- `get_vercel_logs` / `get_railway_logs` — provider-specific. Resolve the latest
+  deployment when `deployment_id` is omitted; return the deployment
+  id/url/status plus logs.
 - `get_latest_deployment_logs` — convenience; latest deployment for the mapped
-  provider (default Vercel).
+  provider (`provider` defaults to Vercel, also accepts `railway`).
 
 Log reads are a `read` capability, so they are **allowed by default in every
 environment, including production**. Secrets are redacted from log lines where

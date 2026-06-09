@@ -41,7 +41,7 @@ function guard<A>(fn: (args: A) => unknown | Promise<unknown>) {
   };
 }
 
-const provider = z.enum(["github", "vercel", "supabase", "stripe"]);
+const provider = z.enum(["github", "vercel", "supabase", "stripe", "railway"]);
 const capability = z.enum(["read", "write", "deploy", "env_change", "delete", "destructive_sql"]);
 
 export function registerTools(server: McpServer, store: Store): void {
@@ -312,7 +312,7 @@ function registerProviderTools(server: McpServer, store: Store): void {
       description:
         "Fetch application/deployment logs for a project environment from the mapped provider(s). " +
         "If `provider` is given, reads that provider only; otherwise reads every mapped provider " +
-        "that supports logs (Vercel prioritized in V0). Returns the resource used, time range, log " +
+        "that supports logs (Vercel + Railway in V0, Vercel prioritized). Returns the resource used, time range, log " +
         "lines, and any API limitation. Reads are allowed everywhere and are audited.",
       inputSchema: {
         project: proj,
@@ -480,6 +480,100 @@ function registerProviderTools(server: McpServer, store: Store): void {
       },
     },
     guard((a: any) => pa.vercelCreateDeployment(store, a)),
+  );
+
+  // Railway (GraphQL API)
+  server.registerTool(
+    "get_railway_project_context",
+    {
+      title: "Railway project context",
+      description: "Read the mapped Railway project: its name, environments, and services.",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.railwayProjectContext(store, a)),
+  );
+  server.registerTool(
+    "get_railway_deployments",
+    {
+      title: "Railway deployments",
+      description: "List recent deployments for the mapped Railway project (scoped to its environment/service if mapped).",
+      inputSchema: { project: proj, environment: env, limit: z.number().optional() },
+    },
+    guard((a: any) => pa.railwayDeployments(store, a)),
+  );
+  server.registerTool(
+    "get_railway_logs",
+    {
+      title: "Get Railway logs",
+      description:
+        "Fetch logs from the mapped Railway project. If `deployment_id` is given, reads that " +
+        "deployment; otherwise resolves the latest deployment first. Returns the deployment " +
+        "id/url/status plus log lines. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        deployment_id: z.string().optional().describe("Deployment to read logs for; defaults to latest"),
+        since: z.string().optional().describe("Only logs after this time (ISO timestamp)"),
+        limit: z.number().optional().describe("Max log lines (default 100)"),
+      },
+    },
+    guard((a: any) =>
+      pa.railwayLogs(store, {
+        project: a.project,
+        environment: a.environment,
+        deploymentId: a.deployment_id,
+        since: a.since,
+        limit: a.limit,
+      }),
+    ),
+  );
+  server.registerTool(
+    "create_railway_deployment",
+    {
+      title: "Create Railway deployment",
+      description:
+        "Trigger a deployment of the mapped Railway service, or redeploy an existing deployment " +
+        "(pass deployment_id). PRODUCTION deploys require approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        deployment_id: z.string().optional().describe("Redeploy this existing deployment instead of triggering a fresh one"),
+      },
+    },
+    guard((a: any) =>
+      pa.railwayCreateDeployment(store, {
+        project: a.project,
+        environment: a.environment,
+        deploymentId: a.deployment_id,
+      }),
+    ),
+  );
+  server.registerTool(
+    "set_railway_env_var",
+    {
+      title: "Set Railway variable",
+      description:
+        "Create/update a variable on the mapped Railway project/service. PRODUCTION changes " +
+        "require approval by default. Railway redeploys the affected service unless skip_deploys is true.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        key: z.string(),
+        value: z.string(),
+        service_id: z.string().optional().describe("Override the mapped serviceId (omit for a shared variable)"),
+        skip_deploys: z.boolean().optional().describe("Don't trigger a redeploy after the change"),
+      },
+    },
+    guard((a: any) =>
+      pa.railwaySetEnvVar(store, {
+        project: a.project,
+        environment: a.environment,
+        key: a.key,
+        value: a.value,
+        serviceId: a.service_id,
+        skipDeploys: a.skip_deploys,
+      }),
+    ),
   );
 
   // Supabase

@@ -10,9 +10,9 @@
  * never persisted to disk (see ProviderConnection.auth).
  */
 
-export type ProviderId = "github" | "vercel" | "supabase" | "stripe";
+export type ProviderId = "github" | "vercel" | "supabase" | "stripe" | "railway";
 
-export const PROVIDER_IDS: ProviderId[] = ["github", "vercel", "supabase", "stripe"];
+export const PROVIDER_IDS: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
 
 /** How "production-like" an environment is. Drives default policy. */
 export type EnvironmentKind = "development" | "staging" | "production";
@@ -110,11 +110,23 @@ export interface StripeResource {
   mode: "test" | "live";
 }
 
+export interface RailwayResource {
+  /** Railway project id (opaque UUID). */
+  projectId: string;
+  /** Railway environment id within the project (e.g. its "production" env). */
+  environmentId?: string;
+  /** Railway service id to scope deployments/logs to a single service. */
+  serviceId?: string;
+  /** Friendly Railway project name, for display only. */
+  projectName?: string;
+}
+
 export type ProviderResource =
   | ({ provider: "github" } & GithubResource)
   | ({ provider: "vercel" } & VercelResource)
   | ({ provider: "supabase" } & SupabaseResource)
-  | ({ provider: "stripe" } & StripeResource);
+  | ({ provider: "stripe" } & StripeResource)
+  | ({ provider: "railway" } & RailwayResource);
 
 export interface ProviderMapping {
   id: string;

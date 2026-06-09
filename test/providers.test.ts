@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { freshStore, seedAcme } from "./helpers.js";
 import * as pa from "../src/provider-actions.js";
-import { listAuditLog } from "../src/service.js";
+import { listAuditLog, mapProviderResource } from "../src/service.js";
 import type { Store } from "../src/storage.js";
 
 /**
@@ -178,6 +178,178 @@ describe("App logs", () => {
     expect(res.status).toBe("ok");
     expect((res as any).data.limitation).toMatch(/not supported/i);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Railway logs", () => {
+  function mapRailway(store: Store) {
+    mapProviderResource(store, {
+      project: "acme-crm",
+      environment: "staging",
+      provider: "railway",
+      resource: { provider: "railway", projectId: "rw_proj_1", environmentId: "rw_env_1", serviceId: "rw_svc_1" },
+    });
+  }
+
+  /** Route a mocked fetch (GraphQL POST) by inspecting the query body. */
+  function routeRailway(opts: { project?: any; deployments?: any[]; logs?: any[]; errors?: any[] }) {
+    return (_url: string, init?: any) => {
+      if (opts.errors) return mockOk({ errors: opts.errors });
+      const q = init?.body ? JSON.parse(init.body).query ?? "" : "";
+      if (q.includes("deploymentLogs")) return mockOk({ data: { deploymentLogs: opts.logs ?? [] } });
+      if (q.includes("deployments(")) {
+        return mockOk({ data: { deployments: { edges: (opts.deployments ?? []).map((node) => ({ node })) } } });
+      }
+      if (q.includes("project(")) return mockOk({ data: { project: opts.project ?? null } });
+      return mockOk({ data: {} });
+    };
+  }
+
+  const RW_LATEST = { id: "rw_dpl_1", status: "FAILED", staticUrl: "acme.up.railway.app", createdAt: "2026-06-09T12:00:00Z" };
+
+  beforeEach(() => {
+    process.env.RAILWAY_TOKEN = "rw_dummy";
+  });
+
+  it("get_railway_logs resolves the latest deployment and normalizes severity", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailway(store);
+    fetchMock.mockImplementation(async (url: string, init: any) =>
+      routeRailway({
+        deployments: [RW_LATEST],
+        logs: [
+          { timestamp: "2026-06-09T12:00:01Z", severity: "info", message: "Starting container" },
+          { timestamp: "2026-06-09T12:00:02Z", severity: "err", message: "Boom: missing DATABASE_URL" },
+        ],
+      })(url, init),
+    );
+
+    const res = await pa.railwayLogs(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    const data = (res as any).data;
+    expect(data.resource.deployment_id).toBe("rw_dpl_1");
+    expect(data.resource.deployment_status).toBe("FAILED");
+    expect(data.resource.deployment_url).toBe("https://acme.up.railway.app");
+    expect(data.logs).toHaveLength(2);
+    expect(data.logs[1]).toMatchObject({ level: "error", message: "Boom: missing DATABASE_URL" });
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "railway", tool: "get_railway_logs" });
+  });
+
+  it("get_app_logs with no provider reads BOTH vercel and railway (vercel first)", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailway(store);
+    fetchMock.mockImplementation(async (url: string, init: any) => {
+      if (url.includes("backboard.railway")) {
+        return routeRailway({ deployments: [RW_LATEST], logs: [{ timestamp: "t", severity: "info", message: "rw" }] })(url, init);
+      }
+      // Vercel REST
+      if (url.includes("/v7/deployments")) return mockOk({ deployments: [{ uid: "vc_1", url: "v.app", readyState: "READY", created: 1 }] });
+      if (/\/v3\/deployments\/[^/]+\/events/.test(url)) return mockOk([{ type: "stdout", created: 1, text: "vc" }]);
+      return mockOk({});
+    });
+
+    const res = await pa.appLogs(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    expect(res.providers.map((p: any) => p.provider)).toEqual(["vercel", "railway"]);
+  });
+
+  it("get_latest_deployment_logs works for provider=railway", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailway(store);
+    fetchMock.mockImplementation(async (url: string, init: any) =>
+      routeRailway({ deployments: [RW_LATEST], logs: [] })(url, init),
+    );
+    const res = await pa.latestDeploymentLogs(store, { environment: "staging", provider: "railway" });
+    expect(res.status).toBe("ok");
+    expect((res as any).data.resource.deployment_id).toBe("rw_dpl_1");
+    // No log lines -> a clear limitation, still ok + audited.
+    expect((res as any).data.limitation).toBeTruthy();
+    expect(lastAudit(store)).toMatchObject({ provider: "railway", tool: "get_latest_deployment_logs", result: "success" });
+  });
+
+  it("surfaces a GraphQL error as a clean error envelope", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailway(store);
+    fetchMock.mockImplementation(async (url: string, init: any) =>
+      routeRailway({ errors: [{ message: "Not Authorized" }] })(url, init),
+    );
+    const res = await pa.railwayDeployments(store, { environment: "staging" });
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/Not Authorized/);
+  });
+});
+
+describe("Railway writes", () => {
+  function mapRailwayTo(store: Store, environment: string) {
+    mapProviderResource(store, {
+      project: "acme-crm",
+      environment,
+      provider: "railway",
+      resource: { provider: "railway", projectId: "rw_proj_1", environmentId: "rw_env_1", serviceId: "rw_svc_1" },
+    });
+  }
+
+  function routeMutations() {
+    return (_url: string, init?: any) => {
+      const q = init?.body ? JSON.parse(init.body).query ?? "" : "";
+      if (q.includes("environmentTriggersDeploy")) return mockOk({ data: { environmentTriggersDeploy: "rw_dpl_new" } });
+      if (q.includes("deploymentRedeploy")) return mockOk({ data: { deploymentRedeploy: { id: "rw_dpl_re", status: "BUILDING" } } });
+      if (q.includes("variableUpsert")) return mockOk({ data: { variableUpsert: true } });
+      return mockOk({ data: {} });
+    };
+  }
+
+  beforeEach(() => {
+    process.env.RAILWAY_TOKEN = "rw_dummy";
+  });
+
+  it("allows and executes a staging deploy", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailwayTo(store, "staging");
+    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    const res = await pa.railwayCreateDeployment(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    expect((res as any).data.deploymentId).toBe("rw_dpl_new");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "railway", tool: "create_railway_deployment" });
+  });
+
+  it("requires approval for a production deploy and does NOT execute", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailwayTo(store, "production");
+    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    const res = await pa.railwayCreateDeployment(store, { environment: "production" });
+    expect(res.status).toBe("approval_required");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(lastAudit(store)).toMatchObject({ result: "not_executed", policyDecision: "approval_required" });
+  });
+
+  it("requires approval for a production variable change and does NOT execute", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailwayTo(store, "production");
+    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    const res = await pa.railwaySetEnvVar(store, { environment: "production", key: "DATABASE_URL", value: "postgres://..." });
+    expect(res.status).toBe("approval_required");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allows and executes a staging variable change", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailwayTo(store, "staging");
+    fetchMock.mockImplementation(async (url: string, init: any) => routeMutations()(url, init));
+    const res = await pa.railwaySetEnvVar(store, { environment: "staging", key: "FEATURE_FLAG", value: "on" });
+    expect(res.status).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
+    expect(body.variables.input).toMatchObject({ name: "FEATURE_FLAG", value: "on", environmentId: "rw_env_1" });
   });
 });
 

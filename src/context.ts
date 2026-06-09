@@ -65,6 +65,9 @@ function actionCatalog(envName: string, stripeMode: "test" | "live"): ActionCata
   return [
     { provider: "github", capability: "read", label: "inspect GitHub repo (metadata, README, files)" },
     { provider: "vercel", capability: "read", label: "read Vercel deployment status & logs" },
+    { provider: "railway", capability: "read", label: "read Railway deployment status & logs" },
+    { provider: "railway", capability: "deploy", label: `deploy to Railway (${envName})` },
+    { provider: "railway", capability: "env_change", label: `change Railway variables (${envName})` },
     { provider: "supabase", capability: "read", label: `query ${envName} Supabase (read-only)` },
     { provider: "stripe", capability: "read", label: "list Stripe products/prices" },
     { provider: "stripe", capability: "write", live: stripeMode === "live", label: `create Stripe ${stripeMode}-mode products/prices` },
@@ -149,6 +152,7 @@ export interface EnvironmentContext {
   isProduction: boolean;
   source: { githubRepo?: string };
   deployment: { vercelProject?: string; latest: VercelSnapshot["latest"]; lastKnownIssue?: string; liveDataError?: string };
+  railway?: { projectId: string; environmentId?: string; serviceId?: string };
   database: { supabaseProjectRef?: string; writes: string };
   payments: { stripeMode?: string; testWrites: string; liveWrites: string };
   allowed: string[];
@@ -179,6 +183,15 @@ async function buildEnvironmentContext(
   const vercelMap = findMapping(store, env, "vercel");
   const supabaseMap = findMapping(store, env, "supabase");
   const stripeMap = findMapping(store, env, "stripe");
+  const railwayMap = findMapping(store, env, "railway");
+  const railway =
+    railwayMap && railwayMap.resource.provider === "railway"
+      ? {
+          projectId: railwayMap.resource.projectId,
+          environmentId: railwayMap.resource.environmentId,
+          serviceId: railwayMap.resource.serviceId,
+        }
+      : undefined;
 
   const githubRepo =
     githubMap && githubMap.resource.provider === "github"
@@ -240,6 +253,7 @@ async function buildEnvironmentContext(
       lastKnownIssue,
       liveDataError: vercelSnapshot?.liveDataError,
     },
+    railway,
     database: { supabaseProjectRef: supabaseRef, writes: supabaseWrites },
     payments: { stripeMode, testWrites: stripeTestWrites, liveWrites: stripeLiveWrites },
     allowed: buckets.allowed,
@@ -293,6 +307,10 @@ function renderEnvSummary(project: Project, ec: EnvironmentContext): string {
     L.push("- Latest deployment: (no deployments / not fetched)");
   }
   if (ec.deployment.lastKnownIssue) L.push(`- Last known issue: ${ec.deployment.lastKnownIssue}`);
+  if (ec.railway) {
+    L.push(`- Railway project: ${ec.railway.projectId}`);
+    if (ec.railway.serviceId) L.push(`- Railway service: ${ec.railway.serviceId}`);
+  }
   L.push("");
   L.push("Database:");
   L.push(`- Supabase project: ${ec.database.supabaseProjectRef ?? "(not mapped)"}`);

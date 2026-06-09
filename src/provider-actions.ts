@@ -12,6 +12,7 @@ import * as gh from "./providers/github.js";
 import * as vc from "./providers/vercel.js";
 import * as sb from "./providers/supabase.js";
 import * as st from "./providers/stripe.js";
+import * as rw from "./providers/railway.js";
 import type { ActionContext, Capability, Environment, Project, ProviderId } from "./types.js";
 import { findConnection } from "./resolve.js";
 import { resolveToken } from "./providers/auth.js";
@@ -230,8 +231,8 @@ export async function vercelCreateDeployment(
 // Log reads are a "read" capability, so they are allowed by default in every
 // environment (including production) and audited like any other guarded action.
 
-/** Providers that can serve app logs in V0. Vercel is prioritized. */
-const LOG_PROVIDERS: ProviderId[] = ["vercel"];
+/** Providers that can serve app logs in V0, in priority order (Vercel first). */
+const LOG_PROVIDERS: ProviderId[] = ["vercel", "railway"];
 
 interface NormalizedLog {
   timestamp: string;
@@ -277,6 +278,18 @@ function normalizeVercelEvent(e: vc.VercelLogEvent): NormalizedLog {
   const timestamp =
     typeof e.created === "number" && e.created > 0 ? new Date(e.created).toISOString() : "";
   return { level, timestamp, message: redactSecrets(e.text ?? "") };
+}
+
+function normalizeRailwayLog(l: rw.RailwayLog): NormalizedLog {
+  const sev = (l.severity ?? "").toLowerCase();
+  const level = /err|fatal|crit/.test(sev) ? "error" : /warn/.test(sev) ? "warn" : "info";
+  return { level, timestamp: l.timestamp ?? "", message: redactSecrets(l.message ?? "") };
+}
+
+/** Prefix a bare host (e.g. "app.up.railway.app") with https:// if it has no scheme. */
+function httpsUrl(u?: string): string | undefined {
+  if (!u) return undefined;
+  return /^https?:\/\//i.test(u) ? u : `https://${u}`;
 }
 
 /** Parse the optional `since` (epoch ms or ISO timestamp) into epoch ms. */
@@ -393,18 +406,229 @@ export function vercelLogs(
   return runVercelLogs(store, input, "get_vercel_logs");
 }
 
+// --- Railway (logs) --------------------------------------------------------
+
+function railwayResource(store: Store, project: Project, environment: Environment) {
+  const m = requireMapping(store, project, environment, "railway");
+  return m.resource as {
+    projectId: string;
+    environmentId?: string;
+    serviceId?: string;
+    projectName?: string;
+  };
+}
+
+/**
+ * Resolve the target Railway deployment (latest if none given) and fetch its
+ * logs. Mirrors fetchVercelLogsData: log-availability problems become a
+ * `limitation` (with status attached) rather than a thrown error.
+ */
+async function fetchRailwayLogsData(
+  token: string,
+  r: { projectId: string; environmentId?: string; serviceId?: string },
+  opts: { deploymentId?: string; since?: string; limit?: number },
+): Promise<LogResult> {
+  const limit = opts.limit ?? 100;
+  const time_range = { since: opts.since };
+
+  let deploymentId = opts.deploymentId;
+  let deployment_url: string | undefined;
+  let deployment_status: string | undefined;
+
+  if (!deploymentId) {
+    const deps = await rw.listDeployments(
+      token,
+      { projectId: r.projectId, environmentId: r.environmentId, serviceId: r.serviceId },
+      1,
+    );
+    if (deps.length === 0) {
+      return {
+        resource: { project: r.projectId },
+        time_range,
+        logs: [],
+        limitation: "No deployments found for this Railway project/service — nothing to fetch logs for.",
+        audit_written: true,
+      };
+    }
+    const latest = deps[0]!;
+    deploymentId = latest.id;
+    deployment_url = httpsUrl(latest.staticUrl ?? latest.url);
+    deployment_status = latest.status;
+  }
+
+  const resource = {
+    project: r.projectId,
+    deployment_id: deploymentId,
+    deployment_url,
+    deployment_status,
+  };
+
+  try {
+    const raw = await rw.getDeploymentLogs(token, deploymentId, limit, opts.since);
+    const logs = raw.map(normalizeRailwayLog);
+    const limitation =
+      logs.length === 0
+        ? "Railway returned no log lines for this deployment (logs may have expired or the " +
+          "deployment produced none)."
+        : undefined;
+    return { resource, time_range, logs, limitation, audit_written: true };
+  } catch (err) {
+    return {
+      resource,
+      time_range,
+      logs: [],
+      limitation:
+        `Could not fetch Railway deployment logs (${err instanceof Error ? err.message : String(err)}). ` +
+        "Returning the deployment status only.",
+      audit_written: true,
+    };
+  }
+}
+
+/** Shared guarded Railway log read; `tool` distinguishes the audited entry. */
+function runRailwayLogs(
+  store: Store,
+  input: Base & { deploymentId?: string; since?: string; limit?: number },
+  tool: string,
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const r = railwayResource(store, project, environment);
+  const label = input.deploymentId ?? r.projectId;
+  return runGuarded(
+    store,
+    ctx(project, environment, "railway", "read", tool, `logs ${label}`, { resourceLabel: label }),
+    () =>
+      fetchRailwayLogsData(tokenFor(store, "railway"), r, {
+        deploymentId: input.deploymentId,
+        since: input.since,
+        limit: input.limit,
+      }),
+  );
+}
+
+/** get_railway_logs — Railway-specific; resolves latest deployment if none given. */
+export function railwayLogs(
+  store: Store,
+  input: Base & { deploymentId?: string; since?: string; limit?: number },
+): Promise<GuardedResponse> {
+  return runRailwayLogs(store, input, "get_railway_logs");
+}
+
+/** get_railway_project_context — Railway project + its environments/services. */
+export async function railwayProjectContext(store: Store, input: Base): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const r = railwayResource(store, project, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "railway", "read", "get_railway_project_context", `project ${r.projectId}`, {
+      resourceLabel: r.projectId,
+    }),
+    () => rw.getProject(tokenFor(store, "railway"), r.projectId),
+  );
+}
+
+/** get_railway_deployments — recent deployments for the mapped project/service. */
+export async function railwayDeployments(
+  store: Store,
+  input: Base & { limit?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const r = railwayResource(store, project, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "railway", "read", "get_railway_deployments", `deployments ${r.projectId}`, {
+      resourceLabel: r.projectId,
+    }),
+    () =>
+      rw.listDeployments(
+        tokenFor(store, "railway"),
+        { projectId: r.projectId, environmentId: r.environmentId, serviceId: r.serviceId },
+        input.limit ?? 10,
+      ),
+  );
+}
+
+/**
+ * create_railway_deployment — trigger a deployment of the mapped Railway
+ * service, or redeploy an existing deployment by id. PRODUCTION deploys require
+ * approval by default (capability "deploy").
+ */
+export async function railwayCreateDeployment(
+  store: Store,
+  input: Base & { deploymentId?: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const r = railwayResource(store, project, environment);
+  const label = input.deploymentId ?? r.projectId;
+  return runGuarded(
+    store,
+    ctx(project, environment, "railway", "deploy", "create_railway_deployment", `deploy ${label}`, {
+      resourceLabel: label,
+    }),
+    () => {
+      const token = tokenFor(store, "railway");
+      if (input.deploymentId) return rw.redeploy(token, input.deploymentId);
+      if (!r.environmentId || !r.serviceId) {
+        throw new OfflocalError(
+          "Railway deploy needs the mapping to include environmentId and serviceId " +
+            "(or pass deploymentId to redeploy an existing deployment).",
+        );
+      }
+      return rw.triggerDeploy(token, {
+        projectId: r.projectId,
+        environmentId: r.environmentId,
+        serviceId: r.serviceId,
+      });
+    },
+  );
+}
+
+/**
+ * set_railway_env_var — create/update a Railway variable. PRODUCTION env changes
+ * require approval by default (capability "env_change"). Railway redeploys the
+ * affected service on change unless `skipDeploys` is true.
+ */
+export async function railwaySetEnvVar(
+  store: Store,
+  input: Base & { key: string; value: string; serviceId?: string; skipDeploys?: boolean },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const r = railwayResource(store, project, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "railway", "env_change", "set_railway_env_var", `set var ${input.key} on ${r.projectId}`, {
+      resourceLabel: `${r.projectId}:${input.key}`,
+    }),
+    () => {
+      if (!r.environmentId) {
+        throw new OfflocalError(
+          "Railway variable changes need the mapping to include environmentId.",
+        );
+      }
+      return rw.upsertVariable(tokenFor(store, "railway"), {
+        projectId: r.projectId,
+        environmentId: r.environmentId,
+        serviceId: input.serviceId ?? r.serviceId,
+        name: input.key,
+        value: input.value,
+        skipDeploys: input.skipDeploys,
+      });
+    },
+  );
+}
+
 /** get_latest_deployment_logs — convenience; latest deployment for the provider. */
 export async function latestDeploymentLogs(
   store: Store,
   input: Base & { provider?: ProviderId },
 ): Promise<GuardedResponse> {
   const provider = input.provider ?? "vercel";
+  const base = { project: input.project, environment: input.environment };
   if (provider === "vercel") {
-    return runVercelLogs(
-      store,
-      { project: input.project, environment: input.environment },
-      "get_latest_deployment_logs",
-    );
+    return runVercelLogs(store, base, "get_latest_deployment_logs");
+  }
+  if (provider === "railway") {
+    return runRailwayLogs(store, base, "get_latest_deployment_logs");
   }
   // Other providers don't serve deployment logs in V0 — audit the read and
   // return a clear limitation instead of pretending.
@@ -416,7 +640,7 @@ export async function latestDeploymentLogs(
       resource: { provider },
       time_range: {},
       logs: [],
-      limitation: `Log fetching for ${provider} is not supported in V0 — only Vercel logs are available.`,
+      limitation: `Log fetching for ${provider} is not supported in V0 — only Vercel and Railway logs are available.`,
       audit_written: true,
     }),
   );
@@ -451,27 +675,25 @@ export async function appLogs(
       environment: environment.name,
       providers: [],
       limitation:
-        "No mapped providers support log fetching for this environment. Map a Vercel " +
-        "project with map_provider_resource, or pass an explicit `provider`.",
+        "No mapped providers support log fetching for this environment. Map a Vercel or " +
+        "Railway project with map_provider_resource, or pass an explicit `provider`.",
     };
   }
+
+  const logInput = {
+    project: input.project,
+    environment: input.environment,
+    deploymentId: input.deploymentId,
+    since: input.since,
+    limit: input.limit,
+  };
 
   const providers: GuardedResponse[] = [];
   for (const p of targets) {
     if (p === "vercel") {
-      providers.push(
-        await runVercelLogs(
-          store,
-          {
-            project: input.project,
-            environment: input.environment,
-            deploymentId: input.deploymentId,
-            since: input.since,
-            limit: input.limit,
-          },
-          "get_app_logs",
-        ),
-      );
+      providers.push(await runVercelLogs(store, logInput, "get_app_logs"));
+    } else if (p === "railway") {
+      providers.push(await runRailwayLogs(store, logInput, "get_app_logs"));
     } else {
       providers.push(
         await runGuarded(
@@ -481,7 +703,7 @@ export async function appLogs(
             resource: { provider: p },
             time_range: { since: input.since },
             logs: [],
-            limitation: `Log fetching for ${p} is not supported in V0 — only Vercel logs are available.`,
+            limitation: `Log fetching for ${p} is not supported in V0 — only Vercel and Railway logs are available.`,
             audit_written: true,
           }),
         ),
