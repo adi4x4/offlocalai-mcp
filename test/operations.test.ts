@@ -99,10 +99,27 @@ describe("operational readiness", () => {
       result: "success",
       providerResource: "acme-preview",
     });
+    store.appendAudit({
+      timestamp: "2026-06-09T00:00:01.000Z",
+      projectSlug: "acme-crm",
+      environment: "production",
+      provider: "vercel",
+      tool: "create_vercel_deployment",
+      actionSummary: "deploy production",
+      policyDecision: "approval_required",
+      result: "not_executed",
+      providerResource: "acme-prod",
+      dashclawDecisionId: "gd_123",
+      dashclawActionId: "act_123",
+      dashclawOutcomeRecorded: false,
+    });
 
     expect(exportAuditLog(store, { project: "acme-crm", format: "jsonl" })).toContain('"tool":"get_vercel_deployments"');
     expect(exportAuditLog(store, { project: "acme-crm", format: "csv" })).toContain("timestamp,project,environment,provider,tool");
+    expect(exportAuditLog(store, { project: "acme-crm", format: "csv" })).toContain("dashclawDecisionId");
+    expect(exportAuditLog(store, { project: "acme-crm", format: "csv" })).toContain("gd_123");
     expect(exportAuditLog(store, { project: "acme-crm", format: "markdown" })).toContain("| Timestamp | Project | Environment |");
+    expect(exportAuditLog(store, { project: "acme-crm", format: "markdown" })).toContain("act_123");
   });
 
   it("exports context snapshots in machine and markdown formats", async () => {

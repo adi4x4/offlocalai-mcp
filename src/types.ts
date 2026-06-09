@@ -245,6 +245,16 @@ export interface AuditLogEntry {
   providerResource?: string;
   /** Agent / MCP client info if the transport exposed it. */
   agent?: string;
+  /** DashClaw guard decision id, when DashClaw governed this action. */
+  dashclawDecisionId?: string;
+  /** DashClaw action id, when DashClaw returned or created one. */
+  dashclawActionId?: string;
+  /** Whether offlocal recorded the post-execution outcome to DashClaw. */
+  dashclawOutcomeRecorded?: boolean;
+  /** DashClaw guard/evidence error when governance metadata could not be recorded. */
+  dashclawError?: string;
+  /** Local correlation id used to connect guard payload, audit line, and outcome. */
+  auditCorrelationId?: string;
 }
 
 export interface ProjectMemory {

@@ -552,7 +552,7 @@ git commit -m "feat: map offlocal actions to dashclaw guard payloads"
 - Modify: `src/service.ts`
 - Modify: `test/operations.test.ts`
 
-- [ ] **Step 1: Add failing audit export test**
+- [x] **Step 1: Add failing audit export test**
 
 Append this assertion to the existing `exports audit entries as jsonl, csv, and markdown` test in `test/operations.test.ts` after the current `store.appendAudit(...)` call:
 
@@ -577,7 +577,7 @@ Append this assertion to the existing `exports audit entries as jsonl, csv, and 
     expect(exportAuditLog(store, { project: "acme-crm", format: "markdown" })).toContain("act_123");
 ```
 
-- [ ] **Step 2: Run test and verify type/export failure**
+- [x] **Step 2: Run test and verify type/export failure**
 
 Run:
 
@@ -588,7 +588,7 @@ npm run typecheck
 
 Expected: fail because `AuditLogEntry` does not include DashClaw fields and export rows do not include them.
 
-- [ ] **Step 3: Extend `AuditLogEntry`**
+- [x] **Step 3: Extend `AuditLogEntry`**
 
 In `src/types.ts`, add these optional fields to `AuditLogEntry`:
 
@@ -605,7 +605,7 @@ In `src/types.ts`, add these optional fields to `AuditLogEntry`:
   auditCorrelationId?: string;
 ```
 
-- [ ] **Step 4: Include DashClaw fields in audit export**
+- [x] **Step 4: Include DashClaw fields in audit export**
 
 In `src/service.ts`, replace `auditExportRows()` with:
 
@@ -672,7 +672,7 @@ Replace `titleHeaders` in the markdown branch with:
     ];
 ```
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
 Run:
 

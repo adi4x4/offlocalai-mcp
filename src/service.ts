@@ -828,6 +828,11 @@ function auditExportRows(entries: AuditLogEntry[]): string[][] {
     entry.result,
     entry.providerResource ?? "",
     entry.errorMessage ?? "",
+    entry.dashclawDecisionId ?? "",
+    entry.dashclawActionId ?? "",
+    entry.dashclawOutcomeRecorded === undefined ? "" : String(entry.dashclawOutcomeRecorded),
+    entry.dashclawError ?? "",
+    entry.auditCorrelationId ?? "",
   ]);
 }
 
@@ -845,13 +850,43 @@ export function exportAuditLog(
   if (input.format === "jsonl") {
     return entries.map((entry) => JSON.stringify(entry)).join("\n");
   }
-  const headers = ["timestamp", "project", "environment", "provider", "tool", "policyDecision", "result", "providerResource", "errorMessage"];
+  const headers = [
+    "timestamp",
+    "project",
+    "environment",
+    "provider",
+    "tool",
+    "policyDecision",
+    "result",
+    "providerResource",
+    "errorMessage",
+    "dashclawDecisionId",
+    "dashclawActionId",
+    "dashclawOutcomeRecorded",
+    "dashclawError",
+    "auditCorrelationId",
+  ];
   const rows = auditExportRows(entries);
   if (input.format === "csv") {
     return [headers, ...rows].map((row) => row.map(csvEscape).join(",")).join("\n");
   }
   if (input.format === "markdown") {
-    const titleHeaders = ["Timestamp", "Project", "Environment", "Provider", "Tool", "Policy", "Result", "Resource", "Error"];
+    const titleHeaders = [
+      "Timestamp",
+      "Project",
+      "Environment",
+      "Provider",
+      "Tool",
+      "Policy",
+      "Result",
+      "Resource",
+      "Error",
+      "DashClaw Decision",
+      "DashClaw Action",
+      "DashClaw Outcome",
+      "DashClaw Error",
+      "Correlation",
+    ];
     return [
       `| ${titleHeaders.join(" | ")} |`,
       `| ${titleHeaders.map(() => "---").join(" | ")} |`,
