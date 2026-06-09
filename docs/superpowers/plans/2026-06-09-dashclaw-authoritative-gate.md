@@ -1679,7 +1679,7 @@ git commit -m "docs: document dashclaw authoritative governance"
 **Files:**
 - Review all files changed by Tasks 1-7.
 
-- [ ] **Step 1: Run full verification**
+- [x] **Step 1: Run full verification**
 
 Run:
 
@@ -1694,7 +1694,7 @@ Expected:
 - all Vitest tests pass
 - `npm audit` reports zero vulnerabilities or only known advisories already accepted by the project owner
 
-- [ ] **Step 2: Inspect risky-action audit behavior manually through tests**
+- [x] **Step 2: Inspect risky-action audit behavior manually through tests**
 
 Run:
 
@@ -1710,7 +1710,7 @@ Expected: pass. Confirm in the test names and assertions that:
 - DashClaw block and approval do not execute provider
 - outcome recording failure does not hide provider success
 
-- [ ] **Step 3: Check for accidental secret exposure**
+- [x] **Step 3: Check for accidental secret exposure**
 
 Run:
 
@@ -1720,7 +1720,7 @@ rg -n "DASHCLAW_API_KEY|sk_live|sk_test|VERCEL_TOKEN|GITHUB_TOKEN|SUPABASE_ACCES
 
 Expected: matches are only env var names, sample empty values, or tests asserting redaction. No real secret values appear.
 
-- [ ] **Step 4: Check final worktree**
+- [x] **Step 4: Check final worktree**
 
 Run:
 
@@ -1730,7 +1730,7 @@ git status --short
 
 Expected: only intentional changes remain. Do not revert unrelated dirty files from previous work. If unrelated dirty files exist, mention them in the handoff.
 
-- [ ] **Step 5: Final commit**
+- [x] **Step 5: Final commit**
 
 If Task 8 required fixes:
 
