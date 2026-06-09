@@ -1106,7 +1106,7 @@ git commit -m "feat: enforce dashclaw gate for risky actions"
 - Modify: `src/service.ts`
 - Modify: `test/operations.test.ts`
 
-- [ ] **Step 1: Add failing service tests**
+- [x] **Step 1: Add failing service tests**
 
 Append to `test/operations.test.ts`:
 
@@ -1192,7 +1192,7 @@ Update the top import in `test/operations.test.ts`:
 import { afterEach, describe, expect, it, vi } from "vitest";
 ```
 
-- [ ] **Step 2: Run test and verify failures**
+- [x] **Step 2: Run test and verify failures**
 
 Run:
 
@@ -1202,7 +1202,7 @@ npm test -- test/operations.test.ts
 
 Expected: fail because service functions are missing.
 
-- [ ] **Step 3: Add evidence helpers**
+- [x] **Step 3: Add evidence helpers**
 
 Extend `src/dashclaw/evidence.ts`:
 
@@ -1242,7 +1242,7 @@ export function dashclawRecentDecisionsFetch(query: { project?: string; environm
 }
 ```
 
-- [ ] **Step 4: Add service APIs**
+- [x] **Step 4: Add service APIs**
 
 In `src/service.ts`, import:
 
@@ -1338,7 +1338,7 @@ export function governedActionSummary(
 }
 ```
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 Run:
 

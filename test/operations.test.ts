@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync } from "node:fs";
 import { freshStore, seedAcme } from "./helpers.js";
 import {
   createConnection,
+  dashclawRecentDecisions,
+  dashclawStatus,
   doctor,
+  explainActionRisk,
   exportAuditLog,
   exportContextSnapshot,
+  exportDashclawEvidence,
+  governedActionSummary,
   listConnections,
   simulateAction,
 } from "../src/service.js";
@@ -143,5 +148,147 @@ describe("operational readiness", () => {
     });
     expect(markdown).toContain("# offlocal context snapshot: acme-crm");
     expect(markdown).toContain("Environment: staging");
+  });
+});
+
+describe("DashClaw operations", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.DASHCLAW_BASE_URL;
+    delete process.env.DASHCLAW_API_KEY;
+  });
+
+  it("reports DashClaw status", async () => {
+    process.env.DASHCLAW_BASE_URL = "https://dashclaw.example";
+    process.env.DASHCLAW_API_KEY = "dc_key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
+
+    const report = await dashclawStatus();
+
+    expect(report).toMatchObject({ configured: true, reachable: true, mode: "authoritative" });
+  });
+
+  it("falls back when DashClaw doctor is unavailable", async () => {
+    process.env.DASHCLAW_BASE_URL = "https://dashclaw.example";
+    process.env.DASHCLAW_API_KEY = "dc_key";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/doctor")) {
+          return new Response(JSON.stringify({ error: "doctor down" }), { status: 500 });
+        }
+        return new Response(JSON.stringify({ agents: [] }), { status: 200 });
+      }),
+    );
+
+    const report = await dashclawStatus();
+
+    expect(report).toMatchObject({ configured: true, reachable: true, mode: "authoritative" });
+    expect(fetch).toHaveBeenCalledWith("https://dashclaw.example/api/agents", expect.any(Object));
+  });
+
+  it("fetches recent DashClaw decisions with scoped query parameters", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    process.env.DASHCLAW_BASE_URL = "https://dashclaw.example";
+    process.env.DASHCLAW_API_KEY = "dc_key";
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ decisions: [{ id: "gd_1" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const decisions = await dashclawRecentDecisions(store, {
+      project: "acme-crm",
+      environment: "production",
+      limit: 5,
+    });
+
+    expect(decisions).toEqual({ decisions: [{ id: "gd_1" }] });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://dashclaw.example/api/guard/decisions?project=acme-crm&environment=production&limit=5",
+      expect.any(Object),
+    );
+  });
+
+  it("exports local evidence linked to DashClaw ids", () => {
+    const store = freshStore();
+    seedAcme(store);
+    store.appendAudit({
+      timestamp: "2026-06-09T00:00:00.000Z",
+      projectSlug: "acme-crm",
+      environment: "production",
+      provider: "vercel",
+      tool: "create_vercel_deployment",
+      actionSummary: "deploy prod",
+      policyDecision: "approval_required",
+      result: "not_executed",
+      dashclawDecisionId: "gd_1",
+      dashclawActionId: "act_1",
+    });
+
+    const evidence = exportDashclawEvidence(store, { project: "acme-crm", environment: "production" });
+
+    expect(evidence).toMatchObject({
+      schema: "offlocal.dashclaw.evidence.v1",
+      entries: [expect.objectContaining({ dashclawDecisionId: "gd_1", dashclawActionId: "act_1" })],
+    });
+  });
+
+  it("explains action risk without executing a provider call", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    process.env.DASHCLAW_BASE_URL = "https://dashclaw.example";
+    process.env.DASHCLAW_API_KEY = "dc_key";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ decision: "require_approval", reason: "review" }), { status: 200 })));
+
+    const explanation = await explainActionRisk(store, {
+      project: "acme-crm",
+      environment: "production",
+      provider: "vercel",
+      capability: "deploy",
+      tool: "create_vercel_deployment",
+      summary: "deploy prod",
+      resourceLabel: "acme-prod",
+    });
+
+    expect(explanation).toMatchObject({
+      risky: true,
+      localPolicy: expect.objectContaining({ effect: "approval_required" }),
+      dashclaw: expect.objectContaining({ decision: "require_approval" }),
+    });
+  });
+
+  it("summarizes governed actions from local audit evidence", () => {
+    const store = freshStore();
+    seedAcme(store);
+    store.appendAudit({
+      timestamp: "2026-06-09T00:00:00.000Z",
+      projectSlug: "acme-crm",
+      environment: "production",
+      provider: "vercel",
+      tool: "create_vercel_deployment",
+      actionSummary: "deploy prod",
+      policyDecision: "approval_required",
+      result: "not_executed",
+      dashclawDecisionId: "gd_1",
+      dashclawActionId: "act_1",
+      dashclawOutcomeRecorded: false,
+    });
+
+    const summary = governedActionSummary(store, { project: "acme-crm", environment: "production" });
+
+    expect(summary).toMatchObject({
+      project: "acme-crm",
+      environment: "production",
+      entries: [
+        {
+          timestamp: "2026-06-09T00:00:00.000Z",
+          tool: "create_vercel_deployment",
+          result: "not_executed",
+          policyDecision: "approval_required",
+          dashclawDecisionId: "gd_1",
+          dashclawActionId: "act_1",
+          dashclawOutcomeRecorded: false,
+        },
+      ],
+    });
   });
 });

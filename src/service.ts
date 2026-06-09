@@ -1,5 +1,7 @@
 import type { Store } from "./storage.js";
 import { buildProjectContext, type ProjectContext } from "./context.js";
+import { dashclawRecentDecisionsFetch, dashclawStatusReport } from "./dashclaw/evidence.js";
+import { buildDashclawGuardPayload, guardWithDashclaw, isRiskyAction, localPolicyPreview } from "./dashclaw/guard.js";
 import { evaluatePolicy } from "./policy.js";
 import { resolveEnvironment, resolveProject, requireMapping } from "./resolve.js";
 import { defaultEnvVar } from "./providers/auth.js";
@@ -810,6 +812,97 @@ export function doctor(store: Store, input: { project?: string; environment?: st
     total: checks.length,
   };
   return { status: combineDoctorStatus(checks), summary, checks };
+}
+
+export function dashclawStatus() {
+  return dashclawStatusReport();
+}
+
+export function exportDashclawEvidence(
+  store: Store,
+  input: { project?: string; environment?: string; provider?: ProviderId; limit?: number } = {},
+) {
+  const entries = listAuditLog(store, input).filter(
+    (entry) => entry.dashclawDecisionId || entry.dashclawActionId || entry.dashclawError,
+  );
+  return {
+    schema: "offlocal.dashclaw.evidence.v1",
+    exportedAt: nowIso(),
+    entries,
+  };
+}
+
+export async function dashclawRecentDecisions(
+  store: Store,
+  input: { project?: string; environment?: string; limit?: number } = {},
+) {
+  assertPositiveInteger(input.limit, "limit");
+  const project = input.project ? resolveProject(store, input.project).slug : undefined;
+  return dashclawRecentDecisionsFetch({
+    project,
+    environment: input.environment,
+    limit: input.limit ?? 20,
+  });
+}
+
+export async function explainActionRisk(
+  store: Store,
+  input: {
+    project?: string;
+    environment: string;
+    provider: ProviderId;
+    capability: Capability;
+    tool: string;
+    summary: string;
+    resourceLabel?: string;
+    live?: boolean;
+  },
+) {
+  assertProviderId(input.provider);
+  assertCapability(input.capability);
+  const project = resolveProject(store, input.project);
+  const environment = resolveEnvironment(store, project, input.environment);
+  const ctx: ActionContext = {
+    project,
+    environment,
+    provider: input.provider,
+    capability: input.capability,
+    tool: input.tool,
+    summary: input.summary,
+    resourceLabel: input.resourceLabel,
+    live: input.live,
+  };
+  const localPolicy = localPolicyPreview(store, ctx);
+  const dashclawPayload = buildDashclawGuardPayload(ctx, localPolicy, newId("audit"));
+  let dashclaw: unknown;
+  try {
+    dashclaw = await guardWithDashclaw(store, ctx);
+  } catch (err) {
+    dashclaw = { error: err instanceof Error ? err.message : String(err) };
+  }
+  return { risky: isRiskyAction(ctx), localPolicy, dashclawPayload, dashclaw };
+}
+
+export function governedActionSummary(
+  store: Store,
+  input: { project?: string; environment?: string; provider?: ProviderId; limit?: number } = {},
+) {
+  const entries = listAuditLog(store, input);
+  return {
+    project: input.project,
+    environment: input.environment,
+    provider: input.provider,
+    entries: entries.map((entry) => ({
+      timestamp: entry.timestamp,
+      tool: entry.tool,
+      result: entry.result,
+      policyDecision: entry.policyDecision,
+      dashclawDecisionId: entry.dashclawDecisionId,
+      dashclawActionId: entry.dashclawActionId,
+      dashclawOutcomeRecorded: entry.dashclawOutcomeRecorded,
+      dashclawError: entry.dashclawError,
+    })),
+  };
 }
 
 function csvEscape(value: unknown): string {
