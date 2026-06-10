@@ -76,4 +76,41 @@ describe("npm package contents", () => {
     expect(readme).toContain("list_github_workflow_runs");
     expect(readme).toContain("rerun_github_workflow_run");
   });
+
+  it("keeps the Windows token setup script in sync with provider credentials", () => {
+    const script = readFileSync("scripts/setup-tokens.ps1", "utf8");
+    const expectedVars = [
+      "GITHUB_TOKEN",
+      "VERCEL_TOKEN",
+      "VERCEL_TEAM_ID",
+      "SUPABASE_ACCESS_TOKEN",
+      "STRIPE_TEST_SECRET_KEY",
+      "STRIPE_LIVE_SECRET_KEY",
+      "RAILWAY_TOKEN",
+      "NEON_API_KEY",
+      "UPSTASH_EMAIL",
+      "UPSTASH_API_KEY",
+      "QSTASH_TOKEN",
+      "QSTASH_CURRENT_SIGNING_KEY",
+      "QSTASH_NEXT_SIGNING_KEY",
+      "CLOUDFLARE_API_TOKEN",
+      "R2_ACCESS_KEY_ID",
+      "R2_SECRET_ACCESS_KEY",
+      "SENTRY_AUTH_TOKEN",
+      "POSTHOG_PERSONAL_API_KEY",
+      "CLERK_SECRET_KEY",
+      "RESEND_API_KEY",
+      "TWILIO_AUTH_TOKEN",
+      "NAMECHEAP_API_USER",
+      "NAMECHEAP_API_KEY",
+      "NAMECHEAP_CLIENT_IP",
+      "NAMECHEAP_SANDBOX",
+      "DASHCLAW_BASE_URL",
+      "DASHCLAW_API_KEY",
+    ];
+
+    for (const name of expectedVars) {
+      expect(script).toContain(`${name} `);
+    }
+  });
 });
