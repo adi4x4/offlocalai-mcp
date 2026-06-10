@@ -49,6 +49,15 @@ export function defaultDecision(ctx: ActionContext): PolicyDecision {
     };
   }
 
+  // Purchases spend real money and require a human in every environment kind.
+  if (capability === "purchase") {
+    return {
+      effect: "approval_required",
+      reason: "Purchases spend real money and always require approval.",
+      source: "default:purchase",
+    };
+  }
+
   // Reads are always safe.
   if (capability === "read") {
     return { effect: "allow", reason: "Read-only action.", source: "default:read" };
@@ -102,18 +111,28 @@ export function evaluatePolicy(rules: readonly PolicyRule[], ctx: ActionContext)
     .filter((r) => ruleMatches(r, ctx))
     .sort((a, b) => b.priority - a.priority);
 
-  if (matching.length > 0) {
-    const rule = matching[0]!;
+  const resolved: PolicyDecision =
+    matching.length > 0
+      ? {
+          effect: matching[0]!.effect,
+          reason:
+            matching[0]!.description ??
+            `Matched explicit policy rule ${matching[0]!.id} (effect=${matching[0]!.effect}).`,
+          source: `rule:${matching[0]!.id}`,
+        }
+      : defaultDecision(ctx);
+
+  // Invariant: purchase can never resolve below approval_required, even when an
+  // explicit allow rule matches. (Block rules still block — stricter is fine.)
+  if (ctx.capability === "purchase" && resolved.effect === "allow") {
     return {
-      effect: rule.effect,
-      reason:
-        rule.description ??
-        `Matched explicit policy rule ${rule.id} (effect=${rule.effect}).`,
-      source: `rule:${rule.id}`,
+      effect: "approval_required",
+      reason: "Purchases always require approval; the matching allow rule was clamped.",
+      source: "clamp:purchase",
     };
   }
 
-  return defaultDecision(ctx);
+  return resolved;
 }
 
 /** Human-readable capability label for messages. */
@@ -131,6 +150,8 @@ export function capabilityLabel(c: Capability): string {
       return "delete";
     case "destructive_sql":
       return "destructive SQL";
+    case "purchase":
+      return "purchase";
   }
 }
 

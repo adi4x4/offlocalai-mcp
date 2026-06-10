@@ -13,6 +13,9 @@ import * as vc from "./providers/vercel.js";
 import * as sb from "./providers/supabase.js";
 import * as st from "./providers/stripe.js";
 import * as rw from "./providers/railway.js";
+import * as ne from "./providers/neon.js";
+import * as nc from "./providers/namecheap.js";
+import { loadRegistrantContact } from "./config.js";
 import type { ActionContext, Capability, Environment, Project, ProviderId } from "./types.js";
 import { findConnection } from "./resolve.js";
 import { resolveToken } from "./providers/auth.js";
@@ -311,6 +314,62 @@ export async function vercelCreateDeployment(
           gitSource: input.gitSource,
         },
         vercelTeamId(store, r.teamId, r.connectionId),
+      ),
+  );
+}
+
+/**
+ * create_vercel_project — create a Vercel project (capability "write"). No
+ * mapping is required: the project usually doesn't exist locally yet; any
+ * existing Vercel mapping only supplies credentials/team scope.
+ */
+export async function vercelCreateProject(
+  store: Store,
+  input: Base & { name: string; framework?: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const name = assertNonEmptyString("name", input.name);
+  const mapping = findMapping(store, environment, "vercel");
+  const teamId = mapping?.resource.provider === "vercel" ? mapping.resource.teamId : undefined;
+  return runGuarded(
+    store,
+    ctx(project, environment, "vercel", "write", "create_vercel_project", `create Vercel project ${name}`, {
+      resourceLabel: name,
+    }),
+    () =>
+      vc.createProject(
+        tokenFor(store, "vercel", mapping?.connectionId),
+        { name, framework: input.framework },
+        vercelTeamId(store, teamId, mapping?.connectionId),
+      ),
+  );
+}
+
+/**
+ * add_vercel_domain — attach a domain to a Vercel project (capability
+ * "write"). The result includes the DNS target (A 76.76.21.21 for apex,
+ * CNAME cname.vercel-dns.com for subdomains) to set at the registrar.
+ */
+export async function vercelAddDomain(
+  store: Store,
+  input: Base & { vercelProject: string; domain: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const vercelProject = assertNonEmptyString("vercelProject", input.vercelProject);
+  const domain = assertNonEmptyString("domain", input.domain);
+  const mapping = findMapping(store, environment, "vercel");
+  const teamId = mapping?.resource.provider === "vercel" ? mapping.resource.teamId : undefined;
+  return runGuarded(
+    store,
+    ctx(project, environment, "vercel", "write", "add_vercel_domain", `attach ${domain} to Vercel project ${vercelProject}`, {
+      resourceLabel: `${vercelProject}:${domain}`,
+    }),
+    () =>
+      vc.addProjectDomain(
+        tokenFor(store, "vercel", mapping?.connectionId),
+        vercelProject,
+        domain,
+        vercelTeamId(store, teamId, mapping?.connectionId),
       ),
   );
 }
@@ -733,6 +792,193 @@ export async function railwaySetEnvVar(
   );
 }
 
+// --- Namecheap -----------------------------------------------------------------
+
+/** check_domain_availability — availability + premium pricing (read-only). */
+export async function checkDomainAvailability(
+  store: Store,
+  input: Base & { domains: string[] },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  if (!Array.isArray(input.domains) || input.domains.length === 0) {
+    throw new OfflocalError("domains must be a non-empty list of domain names.");
+  }
+  const label = input.domains.join(",");
+  return runGuarded(
+    store,
+    ctx(project, environment, "namecheap", "read", "check_domain_availability", `check availability of ${label}`, {
+      resourceLabel: label,
+    }),
+    () => nc.checkDomains(tokenFor(store, "namecheap"), input.domains),
+  );
+}
+
+/** list_namecheap_domains — domains in the Namecheap account (read-only). */
+export async function namecheapListDomains(
+  store: Store,
+  input: Base & { page?: number; pageSize?: number; searchTerm?: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  return runGuarded(
+    store,
+    ctx(project, environment, "namecheap", "read", "list_namecheap_domains", "list Namecheap domains"),
+    () => {
+      assertPositiveInteger("page", input.page);
+      assertPositiveInteger("pageSize", input.pageSize);
+      return nc.listDomains(tokenFor(store, "namecheap"), {
+        page: input.page,
+        pageSize: input.pageSize,
+        searchTerm: input.searchTerm,
+      });
+    },
+  );
+}
+
+/**
+ * purchase_domain — registers a domain and SPENDS REAL MONEY. Capability
+ * "purchase" is clamped to approval_required by policy and marked live, so it
+ * always needs a human. The registrant contact is validated before any HTTP
+ * (including the DashClaw guard call) so a missing config never burns an
+ * approval round-trip.
+ */
+export async function purchaseDomain(
+  store: Store,
+  input: Base & { domain: string; years?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const domain = assertNonEmptyString("domain", input.domain);
+  const registrant = loadRegistrantContact(store.paths.config);
+  if (!registrant) {
+    throw new OfflocalError(
+      `Domain purchase needs a registrant contact. Add a "namecheap.registrant" block to ` +
+        `${store.paths.config} with first_name, last_name, address1, city, state_province, ` +
+        `postal_code, country, phone (format +1.NNNNNNNNNN), email_address — then retry.`,
+    );
+  }
+  return runGuarded(
+    store,
+    ctx(project, environment, "namecheap", "purchase", "purchase_domain", `purchase domain ${domain}`, {
+      live: true,
+      resourceLabel: domain,
+    }),
+    () => {
+      assertPositiveInteger("years", input.years);
+      return nc.createDomain(tokenFor(store, "namecheap"), {
+        domain,
+        years: input.years,
+        registrant,
+      });
+    },
+  );
+}
+
+/** get_dns_records — DNS host records for a domain (read-only). */
+export async function getDnsRecords(
+  store: Store,
+  input: Base & { domain: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const domain = assertNonEmptyString("domain", input.domain);
+  return runGuarded(
+    store,
+    ctx(project, environment, "namecheap", "read", "get_dns_records", `DNS records for ${domain}`, {
+      resourceLabel: domain,
+    }),
+    () => nc.getDnsHosts(tokenFor(store, "namecheap"), domain),
+  );
+}
+
+/**
+ * set_dns_records — REPLACES ALL host records for the domain (Namecheap
+ * setHosts semantics). Capability "env_change": approval required in
+ * production by default.
+ */
+export async function setDnsRecords(
+  store: Store,
+  input: Base & { domain: string; records: nc.DnsRecordInput[] },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const domain = assertNonEmptyString("domain", input.domain);
+  if (!Array.isArray(input.records) || input.records.length === 0) {
+    throw new OfflocalError(
+      "records must be a non-empty list — setHosts REPLACES ALL host records, so an empty list would wipe the domain's DNS.",
+    );
+  }
+  return runGuarded(
+    store,
+    ctx(project, environment, "namecheap", "env_change", "set_dns_records", `REPLACE all DNS host records for ${domain}`, {
+      resourceLabel: domain,
+    }),
+    () => nc.setDnsHosts(tokenFor(store, "namecheap"), domain, input.records),
+  );
+}
+
+// --- Neon --------------------------------------------------------------------
+
+/** list_neon_projects — Neon projects visible to the API key (read-only). */
+export async function neonListProjects(store: Store, input: Base): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  return runGuarded(
+    store,
+    ctx(project, environment, "neon", "read", "list_neon_projects", "list Neon projects"),
+    () => ne.listProjects(tokenFor(store, "neon")),
+  );
+}
+
+/** create_neon_project — provision a Neon project (capability "write"). */
+export async function neonCreateProject(
+  store: Store,
+  input: Base & { name?: string; regionId?: string; pgVersion?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const label = input.name ?? "(default name)";
+  return runGuarded(
+    store,
+    ctx(project, environment, "neon", "write", "create_neon_project", `create Neon project ${label}`, {
+      resourceLabel: label,
+    }),
+    () =>
+      ne.createProject(tokenFor(store, "neon"), {
+        name: input.name,
+        regionId: input.regionId,
+        pgVersion: input.pgVersion,
+      }),
+  );
+}
+
+/**
+ * get_neon_connection_uri — fetch the connection URI for a Neon project. The
+ * URI (with credentials) goes to the tool result ONLY; summary and resource
+ * label deliberately name the project, never the URI.
+ */
+export async function neonGetConnectionUri(
+  store: Store,
+  input: Base & {
+    neonProjectId: string;
+    databaseName: string;
+    roleName: string;
+    branchId?: string;
+    pooled?: boolean;
+  },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const id = assertNonEmptyString("neonProjectId", input.neonProjectId);
+  return runGuarded(
+    store,
+    ctx(project, environment, "neon", "read", "get_neon_connection_uri", `connection URI for Neon project ${id}`, {
+      resourceLabel: id,
+    }),
+    () =>
+      ne.getConnectionUri(tokenFor(store, "neon"), {
+        projectId: id,
+        databaseName: assertNonEmptyString("databaseName", input.databaseName),
+        roleName: assertNonEmptyString("roleName", input.roleName),
+        branchId: input.branchId,
+        pooled: input.pooled,
+      }),
+  );
+}
+
 /** get_latest_deployment_logs — convenience; latest deployment for the provider. */
 export async function latestDeploymentLogs(
   store: Store,
@@ -1030,6 +1276,56 @@ export async function stripeCreateProduct(
       resourceLabel: mode,
     }),
     () => st.createProduct(stripeKeyFor(store, environment, mode), { name: assertNonEmptyString("name", input.name), description: input.description }),
+  );
+}
+
+/**
+ * create_stripe_webhook — create a webhook endpoint (capability "write").
+ * Stripe returns the whsec_ signing secret ONLY at creation; it goes to the
+ * tool result and is redacted from audit + DashClaw by the sanitizer.
+ */
+export async function stripeCreateWebhook(
+  store: Store,
+  input: Base & { url: string; enabledEvents: string[]; description?: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const mode = stripeMode(store, environment);
+  const url = assertNonEmptyString("url", input.url);
+  return runGuarded(
+    store,
+    ctx(project, environment, "stripe", "write", "create_stripe_webhook", `create webhook endpoint for ${url} (${mode})`, {
+      live: mode === "live",
+      resourceLabel: mode,
+    }),
+    () => {
+      if (!Array.isArray(input.enabledEvents) || input.enabledEvents.length === 0) {
+        throw new OfflocalError("enabledEvents must be a non-empty list of Stripe event names.");
+      }
+      return st.createWebhookEndpoint(stripeKeyFor(store, environment, mode), {
+        url,
+        enabledEvents: input.enabledEvents,
+        description: input.description,
+      });
+    },
+  );
+}
+
+/** list_stripe_webhooks — webhook endpoints for the environment's mode (read). */
+export async function stripeListWebhooks(
+  store: Store,
+  input: Base & { limit?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const mode = stripeMode(store, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "stripe", "read", "list_stripe_webhooks", `list webhook endpoints (${mode})`, {
+      resourceLabel: mode,
+    }),
+    () => {
+      assertPositiveInteger("limit", input.limit);
+      return st.listWebhookEndpoints(stripeKeyFor(store, environment, mode), input.limit ?? 10);
+    },
   );
 }
 

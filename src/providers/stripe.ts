@@ -120,6 +120,51 @@ export async function listInvoices(
   }));
 }
 
+export interface StripeWebhookEndpoint {
+  id: string;
+  url: string;
+  status?: string;
+  enabledEvents?: string[];
+  created: number;
+  /** Signing secret (whsec_...). Returned by Stripe ONLY at creation time. */
+  secret?: string;
+}
+
+function mapWebhookEndpoint(w: Record<string, any>): StripeWebhookEndpoint {
+  return {
+    id: w.id,
+    url: w.url,
+    status: w.status,
+    enabledEvents: w.enabled_events,
+    created: w.created,
+    secret: w.secret,
+  };
+}
+
+export async function createWebhookEndpoint(
+  key: string,
+  params: { url: string; enabledEvents: string[]; description?: string },
+): Promise<StripeWebhookEndpoint> {
+  const data = await httpJson<Record<string, any>>(`${BASE}/webhook_endpoints`, {
+    method: "POST",
+    headers: headers(key),
+    body: formEncode({
+      url: params.url,
+      enabled_events: params.enabledEvents,
+      description: params.description,
+    }),
+  });
+  return mapWebhookEndpoint(data);
+}
+
+export async function listWebhookEndpoints(key: string, limit = 10): Promise<StripeWebhookEndpoint[]> {
+  const data = await httpJson<{ data?: any[] }>(`${BASE}/webhook_endpoints`, {
+    headers: headers(key),
+    query: { limit: String(limit) },
+  });
+  return (data.data ?? []).map(mapWebhookEndpoint);
+}
+
 export interface StripePrice {
   id: string;
   product: string;

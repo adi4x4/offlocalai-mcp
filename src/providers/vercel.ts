@@ -144,6 +144,83 @@ export async function setEnvVar(
   });
 }
 
+export interface VercelCreatedProject {
+  id: string;
+  name: string;
+  framework: string | null;
+  createdAt?: number;
+}
+
+export async function createProject(
+  token: string,
+  params: { name: string; framework?: string },
+  teamId?: string,
+): Promise<VercelCreatedProject> {
+  const data = await httpJson<Record<string, any>>(`${BASE}/v11/projects`, {
+    method: "POST",
+    headers: { ...headers(token), "Content-Type": "application/json" },
+    query: teamQuery(teamId),
+    body: JSON.stringify({ name: params.name, framework: params.framework }),
+  });
+  return {
+    id: data.id,
+    name: data.name,
+    framework: data.framework ?? null,
+    createdAt: data.createdAt,
+  };
+}
+
+export interface VercelDnsTarget {
+  type: "A" | "CNAME";
+  /** Host record name to set at the registrar, e.g. "@" or "www". */
+  host: string;
+  value: string;
+}
+
+export interface VercelProjectDomain {
+  name: string;
+  apexName: string;
+  projectId: string;
+  verified: boolean;
+  verification?: Array<{ type: string; domain: string; value: string; reason?: string }>;
+  /** The DNS record to create at the registrar so the domain points at Vercel. */
+  dnsTarget: VercelDnsTarget;
+}
+
+/** Vercel's documented targets: apex → A 76.76.21.21, subdomain → CNAME cname.vercel-dns.com. */
+function dnsTargetFor(name: string, apexName: string): VercelDnsTarget {
+  if (name === apexName) return { type: "A", host: "@", value: "76.76.21.21" };
+  const host = name.endsWith(`.${apexName}`) ? name.slice(0, -(apexName.length + 1)) : name;
+  return { type: "CNAME", host, value: "cname.vercel-dns.com" };
+}
+
+export async function addProjectDomain(
+  token: string,
+  projectIdOrName: string,
+  domain: string,
+  teamId?: string,
+): Promise<VercelProjectDomain> {
+  const data = await httpJson<Record<string, any>>(
+    `${BASE}/v10/projects/${projectIdOrName}/domains`,
+    {
+      method: "POST",
+      headers: { ...headers(token), "Content-Type": "application/json" },
+      query: teamQuery(teamId),
+      body: JSON.stringify({ name: domain }),
+    },
+  );
+  const name = String(data.name ?? domain);
+  const apexName = String(data.apexName ?? domain);
+  return {
+    name,
+    apexName,
+    projectId: data.projectId,
+    verified: data.verified === true,
+    verification: data.verification,
+    dnsTarget: dnsTargetFor(name, apexName),
+  };
+}
+
 export async function createDeployment(
   token: string,
   params: {

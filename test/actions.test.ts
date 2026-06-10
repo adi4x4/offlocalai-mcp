@@ -312,6 +312,34 @@ describe("runGuarded DashClaw authoritative mode", () => {
     });
   });
 
+  it("fails closed for purchase actions when DashClaw env is missing", async () => {
+    const { store, project, environment } = stagingContext();
+    const exec = vi.fn(async () => ({ domain: "example.com" }));
+
+    const res = await runGuarded(
+      store,
+      {
+        project,
+        environment,
+        provider: "namecheap",
+        capability: "purchase",
+        tool: "purchase_domain",
+        summary: "purchase example.com",
+        resourceLabel: "example.com",
+      },
+      exec,
+    );
+
+    expect(res.status).toBe("error");
+    expect(res.executed).toBe(false);
+    expect(exec).not.toHaveBeenCalled();
+    expect(store.readAudit()).toHaveLength(1);
+    expect(store.readAudit()[0]).toMatchObject({
+      result: "not_executed",
+      dashclawError: expect.stringMatching(/DASHCLAW_BASE_URL/i),
+    });
+  });
+
   it("allows reads to proceed when DashClaw env is missing", async () => {
     const { store, project, environment } = stagingContext();
     const exec = vi.fn(async () => ({ ok: true }));

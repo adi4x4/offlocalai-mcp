@@ -10,9 +10,9 @@
  * never persisted to disk (see ProviderConnection.auth).
  */
 
-export type ProviderId = "github" | "vercel" | "supabase" | "stripe" | "railway";
+export type ProviderId = "github" | "vercel" | "supabase" | "stripe" | "railway" | "namecheap" | "neon";
 
-export const PROVIDER_IDS: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
+export const PROVIDER_IDS: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway", "namecheap", "neon"];
 
 /** How "production-like" an environment is. Drives default policy. */
 export type EnvironmentKind = "development" | "staging" | "production";
@@ -154,7 +154,8 @@ export type Capability =
   | "deploy" // trigger a deployment
   | "env_change" // change environment variables / config
   | "delete" // delete a resource
-  | "destructive_sql"; // DROP/TRUNCATE/DELETE/ALTER etc.
+  | "destructive_sql" // DROP/TRUNCATE/DELETE/ALTER etc.
+  | "purchase"; // spends real money (e.g. domain purchase); never resolves below approval_required
 
 export type PolicyEffect = "allow" | "block" | "approval_required";
 

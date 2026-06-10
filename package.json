@@ -1,6 +1,6 @@
 {
   "name": "@offlocal/mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Production context layer for AI coding agents. MCPs give agents tools; offlocal.ai gives agents production context (which project, which environment, which provider account, what's allowed, what needs approval, what happened last time).",
   "license": "Apache-2.0",
   "type": "module",
@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "fast-xml-parser": "^5.8.0",
     "yaml": "^2.5.0",
     "zod": "^3.23.8"
   },

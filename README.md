@@ -123,6 +123,11 @@ env = { GITHUB_TOKEN = "ghp_your_token", VERCEL_TOKEN = "your_vercel_token" }
 | `STRIPE_TEST_SECRET_KEY` | Stripe | `sk_test_...` |
 | `STRIPE_LIVE_SECRET_KEY` | Stripe | `sk_live_...` — only used when policy allows a live write |
 | `RAILWAY_TOKEN` | Railway | Account/workspace token |
+| `NEON_API_KEY` | Neon | API key from console.neon.tech → Account settings → API keys |
+| `NAMECHEAP_API_USER` | Namecheap | Account username (also sent as `UserName`) |
+| `NAMECHEAP_API_KEY` | Namecheap | API key from Profile → Tools → API Access |
+| `NAMECHEAP_CLIENT_IP` | Namecheap | Your current public IP — must be whitelisted in API Access |
+| `NAMECHEAP_SANDBOX` | Namecheap | `true` targets api.sandbox.namecheap.com (recommended until ready) |
 | `OFFLOCAL_HTTP_TIMEOUT_MS` | Runtime | Optional provider API timeout in milliseconds; defaults to `30000` |
 | `OFFLOCAL_HTTP_RETRIES` | Runtime | Optional retry count for idempotent provider reads; defaults to `2` |
 | `OFFLOCAL_HTTP_RETRY_BASE_MS` | Runtime | Optional linear retry delay base in milliseconds; defaults to `25` |
@@ -217,6 +222,8 @@ See [offlocal.ai](https://offlocal.ai).
 
 **Vercel:** `get_vercel_project_context`, `get_vercel_deployments`,
 `get_vercel_deployment_status`, `get_vercel_deployment_logs`,
+`create_vercel_project`* (create a new Vercel project),
+`add_vercel_domain`* (attach a domain; returns the DNS records to set),
 `set_vercel_env_var`*, `create_vercel_deployment`*
 
 **Railway:** `get_railway_project_context`, `get_railway_deployments`,
@@ -228,10 +235,30 @@ See [offlocal.ai](https://offlocal.ai).
 
 **Stripe:** `list_stripe_products`, `list_stripe_customers`,
 `list_stripe_subscriptions`, `list_stripe_invoices`, `create_stripe_product`*,
-`create_stripe_price`*
+`create_stripe_price`*,
+`create_stripe_webhook`* (create a webhook endpoint; returns the `whsec_` secret once),
+`list_stripe_webhooks` (list webhook endpoints)
+
+**Neon:** `list_neon_projects` (list Neon Postgres projects),
+`create_neon_project`* (provision a database; returns the connection URI),
+`get_neon_connection_uri` (fetch a DATABASE_URL; redacted from audit)
+
+**Namecheap:** `check_domain_availability` (availability + premium pricing),
+`list_namecheap_domains` (domains in the account),
+`purchase_domain`** (register a domain — real money, always needs approval),
+`get_dns_records` (current host records),
+`set_dns_records`* (REPLACES ALL host records for the domain)
 
 \* gated by policy (production / live / destructive operations require approval
 or are blocked — see below).
+
+\*\* `purchase` capability: approval is **always** required and cannot be
+policy-allowed.
+
+📖 **New here?** [docs/how-to.md](docs/how-to.md) is the 15-minute hands-on
+walkthrough; [docs/architecture.md](docs/architecture.md) explains MCP and
+the guard flow in plain language; [docs/launch-playbook.md](docs/launch-playbook.md)
+walks a full domain → Vercel → Neon → Stripe launch end-to-end.
 
 > `get_project_context` is the one to call **first**. For a project (and
 > optionally a focused `environment`) it returns: the GitHub repo, the Vercel
@@ -445,7 +472,7 @@ src/
   sql.ts             SQL classification (defense-in-depth)
   service.ts         business logic (used by both MCP tools and CLI)
   provider-actions.ts  guarded provider operations
-  providers/         isolated REST adapters: github, vercel, railway, supabase, stripe
+  providers/         isolated REST adapters: github, vercel, railway, supabase, stripe, neon, namecheap
   tools/index.ts     MCP tool registration
   index.ts           stdio MCP server entry
   cli.ts             offlocal CLI

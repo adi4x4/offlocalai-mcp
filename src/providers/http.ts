@@ -143,13 +143,23 @@ export async function httpJson<T = unknown>(
   throw lastError ?? new OfflocalError(`Failed calling ${redactSecrets(finalUrl)}.`);
 }
 
-/** Encode an object as application/x-www-form-urlencoded, incl. bracketed nesting. */
+/** Encode an object as application/x-www-form-urlencoded, incl. bracketed nesting and indexed arrays. */
 export function formEncode(obj: Record<string, unknown>, prefix?: string): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(obj)) {
     if (value === undefined || value === null) continue;
     const field = prefix ? `${prefix}[${key}]` : key;
-    if (typeof value === "object" && !Array.isArray(value)) {
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => {
+        const itemField = `${field}[${index}]`;
+        if (typeof item === "object" && item !== null) {
+          const nested = formEncode(item as Record<string, unknown>, itemField);
+          if (nested) parts.push(nested);
+        } else {
+          parts.push(`${encodeURIComponent(itemField)}=${encodeURIComponent(String(item))}`);
+        }
+      });
+    } else if (typeof value === "object") {
       const nested = formEncode(value as Record<string, unknown>, field);
       if (nested) parts.push(nested);
     } else {

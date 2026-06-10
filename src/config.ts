@@ -9,6 +9,7 @@ import {
   writeProjectMemory,
 } from "./service.js";
 import type { Capability, EnvironmentKind, PolicyRule, ProviderId, ProviderResource } from "./types.js";
+import type { RegistrantContact } from "./providers/namecheap.js";
 import { OfflocalError } from "./util.js";
 
 /**
@@ -54,11 +55,30 @@ interface ConfigProject {
   memory?: ConfigMemory[];
 }
 
+interface ConfigRegistrant {
+  first_name: string;
+  last_name: string;
+  address1: string;
+  address2?: string;
+  city: string;
+  state_province: string;
+  postal_code: string;
+  country: string;
+  /** Format +NNN.NNNNNNNNNN, e.g. "+1.5551234567". */
+  phone: string;
+  email_address: string;
+  organization?: string;
+}
+
 interface OfflocalConfig {
   projects?: Record<string, ConfigProject>;
   policy?: {
     require_approval?: string[];
     block?: string[];
+  };
+  /** Account-level Namecheap settings; registrant contact used for domain purchases. */
+  namecheap?: {
+    registrant?: ConfigRegistrant;
   };
 }
 
@@ -176,12 +196,37 @@ function validateProjectConfig(value: unknown, slug: string): void {
   }
 }
 
+function validateRegistrantConfig(value: unknown): void {
+  if (!isPlainObject(value)) {
+    throw new OfflocalError("Invalid config: namecheap.registrant must be an object.");
+  }
+  for (const field of [
+    "first_name",
+    "last_name",
+    "address1",
+    "city",
+    "state_province",
+    "postal_code",
+    "country",
+    "phone",
+    "email_address",
+  ]) {
+    requiredString(value[field], `namecheap.registrant.${field}`);
+  }
+  optionalString(value.address2, "namecheap.registrant.address2");
+  optionalString(value.organization, "namecheap.registrant.organization");
+}
+
 function validateConfig(value: unknown): OfflocalConfig {
   if (!isPlainObject(value)) {
     throw new OfflocalError("Invalid config: top-level config must be an object.");
   }
   optionalObject(value.projects, "projects");
   optionalObject(value.policy, "policy");
+  optionalObject(value.namecheap, "namecheap");
+  if (isPlainObject(value.namecheap) && value.namecheap.registrant !== undefined) {
+    validateRegistrantConfig(value.namecheap.registrant);
+  }
   if (isPlainObject(value.policy)) {
     optionalStringArray(value.policy.require_approval, "policy.require_approval");
     optionalStringArray(value.policy.block, "policy.block");
@@ -207,7 +252,7 @@ function tokenToMatch(token: string): { provider?: ProviderId; capability: Capab
   const parts = token.trim().split(".");
   const head = parts[0]!;
   const rest = parts.slice(1).join(".");
-  const knownProviders: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
+  const knownProviders: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway", "namecheap", "neon"];
   if (head !== "provider" && head !== "*" && !knownProviders.includes(head as ProviderId)) {
     return null;
   }
@@ -222,6 +267,7 @@ function tokenToMatch(token: string): { provider?: ProviderId; capability: Capab
     destructive_sql: "destructive_sql",
     delete: "delete",
     read: "read",
+    purchase: "purchase",
   };
   // For "provider.delete" the action token is "delete"; for "vercel.deploy" it's "deploy".
   const capability = capByToken[rest] ?? capByToken[head];
@@ -266,6 +312,10 @@ function environmentResource(provider: ProviderId, env: ConfigEnvironment): Prov
         environmentId: env.railway.environment_id,
         serviceId: env.railway.service_id,
       };
+    // No config blocks for these yet; their provider phases add them.
+    case "namecheap":
+    case "neon":
+      return null;
   }
 }
 
@@ -281,6 +331,9 @@ function environmentConnectionId(provider: ProviderId, env: ConfigEnvironment): 
       return env.stripe?.connection_id;
     case "railway":
       return env.railway?.connection_id;
+    case "namecheap":
+    case "neon":
+      return undefined;
   }
 }
 
@@ -360,4 +413,28 @@ export function seedFromConfigFile(store: Store, path: string): SeedResult | und
   const config = loadConfig(path);
   if (!config) return undefined;
   return applyConfig(store, config);
+}
+
+/**
+ * Read the registrant contact for domain purchases from the config file at
+ * call time (it is account data, not runtime state, so it never enters
+ * state.json). Returns undefined when the file or block is absent.
+ */
+export function loadRegistrantContact(path: string): RegistrantContact | undefined {
+  const config = loadConfig(path);
+  const r = config?.namecheap?.registrant;
+  if (!r) return undefined;
+  return {
+    firstName: r.first_name,
+    lastName: r.last_name,
+    address1: r.address1,
+    address2: r.address2,
+    city: r.city,
+    stateProvince: r.state_province,
+    postalCode: r.postal_code,
+    country: r.country,
+    phone: r.phone,
+    emailAddress: r.email_address,
+    organization: r.organization,
+  };
 }

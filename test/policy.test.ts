@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { freshStore, seedAcme } from "./helpers.js";
-import { checkPolicy, setPolicyRule } from "../src/service.js";
+import { addEnvironment, checkPolicy, setPolicyRule } from "../src/service.js";
 import { classifySql } from "../src/sql.js";
 
 describe("policy defaults", () => {
@@ -100,6 +100,34 @@ describe("explicit policy rules override defaults", () => {
         capability: "restart" as any,
       }),
     ).toThrow(/capability/i);
+  });
+});
+
+describe("purchase capability clamp", () => {
+  it("defaults purchase to approval_required in development, staging, and production", () => {
+    const store = freshStore();
+    seedAcme(store);
+    addEnvironment(store, { project: "acme-crm", name: "dev", kind: "development" });
+    for (const environment of ["dev", "staging", "production"]) {
+      const d = checkPolicy(store, { project: "acme-crm", environment, provider: "namecheap", capability: "purchase" });
+      expect(d.effect).toBe("approval_required");
+    }
+  });
+
+  it("still requires approval for purchase when an explicit allow rule matches, in dev and production", () => {
+    const store = freshStore();
+    seedAcme(store);
+    addEnvironment(store, { project: "acme-crm", name: "dev", kind: "development" });
+    setPolicyRule(store, {
+      effect: "allow",
+      priority: 500,
+      description: "Attempt to un-gate purchases (must be clamped).",
+      match: { capability: "purchase" },
+    });
+    for (const environment of ["dev", "production"]) {
+      const d = checkPolicy(store, { project: "acme-crm", environment, provider: "namecheap", capability: "purchase" });
+      expect(d.effect).toBe("approval_required");
+    }
   });
 });
 

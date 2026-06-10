@@ -70,6 +70,7 @@ describe("operational readiness", () => {
   it("reports doctor checks for mappings, env vars, and audit writability", () => {
     const store = freshStore();
     seedAcme(store);
+    delete process.env.GITHUB_TOKEN;
     process.env.VERCEL_TOKEN = "vc_dummy";
     process.env.SUPABASE_ACCESS_TOKEN = "sb_dummy";
     mkdirSync(`${store.paths.audit}.lock`);

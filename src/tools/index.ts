@@ -41,8 +41,8 @@ function guard<A>(fn: (args: A) => unknown | Promise<unknown>) {
   };
 }
 
-const provider = z.enum(["github", "vercel", "supabase", "stripe", "railway"]);
-const capability = z.enum(["read", "write", "deploy", "env_change", "delete", "destructive_sql"]);
+const provider = z.enum(["github", "vercel", "supabase", "stripe", "railway", "namecheap", "neon"]);
+const capability = z.enum(["read", "write", "deploy", "env_change", "delete", "destructive_sql", "purchase"]);
 const nonEmptyString = (description?: string) => {
   const schema = z.string().trim().min(1);
   return description ? schema.describe(description) : schema;
@@ -254,7 +254,7 @@ export function registerTools(server: McpServer, store: Store): void {
     {
       title: "Check policy",
       description:
-        "Ask whether a capability (read/write/deploy/env_change/delete/destructive_sql) is " +
+        "Ask whether a capability (read/write/deploy/env_change/delete/destructive_sql/purchase) is " +
         "allowed, blocked, or requires approval for a provider in an environment — WITHOUT " +
         "executing anything.",
       inputSchema: {
@@ -745,6 +745,46 @@ function registerProviderTools(server: McpServer, store: Store): void {
     guard((a: any) => pa.vercelSetEnvVar(store, a)),
   );
   server.registerTool(
+    "create_vercel_project",
+    {
+      title: "Create Vercel project",
+      description:
+        "Create a new Vercel project (optionally with a framework preset). Map it afterwards with " +
+        "map_provider_resource so deploys and env vars target it.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        name: nonEmptyString("Vercel project name, e.g. acme-site"),
+        framework: optionalNonEmptyString("Framework preset, e.g. nextjs, vite, astro"),
+      },
+    },
+    guard((a: any) => pa.vercelCreateProject(store, a)),
+  );
+  server.registerTool(
+    "add_vercel_domain",
+    {
+      title: "Add Vercel domain",
+      description:
+        "Attach a domain to a Vercel project. The result includes the DNS record to create at the " +
+        "registrar (A 76.76.21.21 for apex, CNAME cname.vercel-dns.com for subdomains) and any " +
+        "verification challenges — set them with set_dns_records.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        vercel_project: nonEmptyString("Vercel project id or name"),
+        domain: nonEmptyString("Domain to attach, e.g. example.com or www.example.com"),
+      },
+    },
+    guard((a: any) =>
+      pa.vercelAddDomain(store, {
+        project: a.project,
+        environment: a.environment,
+        vercelProject: a.vercel_project,
+        domain: a.domain,
+      }),
+    ),
+  );
+  server.registerTool(
     "create_vercel_deployment",
     {
       title: "Create Vercel deployment",
@@ -870,6 +910,177 @@ function registerProviderTools(server: McpServer, store: Store): void {
     ),
   );
 
+  // Namecheap
+  server.registerTool(
+    "check_domain_availability",
+    {
+      title: "Check domain availability",
+      description:
+        "Check whether domains are available to register, including premium status and pricing. Read-only.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        domains: z.array(nonEmptyString()).min(1).describe("Domain names to check, e.g. [\"example.com\"]"),
+      },
+    },
+    guard((a: any) => pa.checkDomainAvailability(store, a)),
+  );
+  server.registerTool(
+    "list_namecheap_domains",
+    {
+      title: "List Namecheap domains",
+      description: "List domains in the Namecheap account with expiry and lock status. Read-only.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        page: positiveInt("Page number (default 1)").optional(),
+        page_size: positiveInt("Domains per page (10-100, default 20)").optional(),
+        search_term: optionalNonEmptyString("Keyword filter"),
+      },
+    },
+    guard((a: any) =>
+      pa.namecheapListDomains(store, {
+        project: a.project,
+        environment: a.environment,
+        page: a.page,
+        pageSize: a.page_size,
+        searchTerm: a.search_term,
+      }),
+    ),
+  );
+  server.registerTool(
+    "purchase_domain",
+    {
+      title: "Purchase domain",
+      description:
+        "Register a domain via Namecheap. SPENDS REAL MONEY and ALWAYS requires human approval " +
+        "(capability \"purchase\" cannot be policy-allowed). Uses the namecheap.registrant contact " +
+        "from .offlocal/config.yaml. Set NAMECHEAP_SANDBOX=true to test without real charges.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        domain: nonEmptyString("Domain to register, e.g. example.com"),
+        years: positiveInt("Registration years (default 1)").optional(),
+      },
+    },
+    guard((a: any) => pa.purchaseDomain(store, a)),
+  );
+  server.registerTool(
+    "get_dns_records",
+    {
+      title: "Get DNS records",
+      description: "List the DNS host records Namecheap serves for a domain. Read-only.",
+      inputSchema: { project: proj, environment: env, domain: nonEmptyString("Domain, e.g. example.com") },
+    },
+    guard((a: any) => pa.getDnsRecords(store, a)),
+  );
+  server.registerTool(
+    "set_dns_records",
+    {
+      title: "Set DNS records",
+      description:
+        "Set the DNS host records for a domain. WARNING: this REPLACES ALL existing host records " +
+        "for the domain — include every record you want to keep (use get_dns_records first). " +
+        "Approval required in production by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        domain: nonEmptyString("Domain, e.g. example.com"),
+        records: z
+          .array(
+            z.object({
+              name: nonEmptyString("Host name, e.g. @ or www"),
+              type: nonEmptyString("Record type: A, AAAA, CNAME, MX, TXT, URL, ..."),
+              address: nonEmptyString("Record value (IP, hostname, or text)"),
+              ttl: positiveInt("TTL seconds (60-60000, default 1800)").optional(),
+              mx_pref: positiveInt("MX preference (MX records only)").optional(),
+            }),
+          )
+          .min(1)
+          .describe("The COMPLETE set of host records for the domain"),
+      },
+    },
+    guard((a: any) =>
+      pa.setDnsRecords(store, {
+        project: a.project,
+        environment: a.environment,
+        domain: a.domain,
+        records: (a.records ?? []).map((r: any) => ({
+          name: r.name,
+          type: r.type,
+          address: r.address,
+          ttl: r.ttl,
+          mxPref: r.mx_pref,
+        })),
+      }),
+    ),
+  );
+
+  // Neon
+  server.registerTool(
+    "list_neon_projects",
+    {
+      title: "List Neon projects",
+      description: "List all Neon projects visible to the API key (account-level, read-only).",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.neonListProjects(store, a)),
+  );
+  server.registerTool(
+    "create_neon_project",
+    {
+      title: "Create Neon project",
+      description:
+        "Provision a new Neon Postgres project. The result includes the connection URI for the " +
+        "default branch — store it as an env var (e.g. DATABASE_URL); it never appears in the audit log.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        name: optionalNonEmptyString("Project name (Neon generates one if omitted)"),
+        region_id: optionalNonEmptyString("Neon region, e.g. aws-us-east-1"),
+        pg_version: positiveInt("Postgres major version, e.g. 17").optional(),
+      },
+    },
+    guard((a: any) =>
+      pa.neonCreateProject(store, {
+        project: a.project,
+        environment: a.environment,
+        name: a.name,
+        regionId: a.region_id,
+        pgVersion: a.pg_version,
+      }),
+    ),
+  );
+  server.registerTool(
+    "get_neon_connection_uri",
+    {
+      title: "Get Neon connection URI",
+      description:
+        "Fetch the connection URI (DATABASE_URL) for a Neon project/branch/database/role. The URI " +
+        "contains credentials: it is returned to you only and is redacted from audit + DashClaw.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        neon_project_id: nonEmptyString("Neon project id"),
+        database_name: nonEmptyString("Database name, e.g. neondb"),
+        role_name: nonEmptyString("Role name, e.g. neondb_owner"),
+        branch_id: optionalNonEmptyString("Branch id (defaults to the project's default branch)"),
+        pooled: z.boolean().optional().describe("Return the pooled connection URI"),
+      },
+    },
+    guard((a: any) =>
+      pa.neonGetConnectionUri(store, {
+        project: a.project,
+        environment: a.environment,
+        neonProjectId: a.neon_project_id,
+        databaseName: a.database_name,
+        roleName: a.role_name,
+        branchId: a.branch_id,
+        pooled: a.pooled,
+      }),
+    ),
+  );
+
   // Supabase
   server.registerTool(
     "list_supabase_projects",
@@ -968,6 +1179,46 @@ function registerProviderTools(server: McpServer, store: Store): void {
       },
     },
     guard((a: any) => pa.stripeListInvoices(store, a)),
+  );
+  server.registerTool(
+    "create_stripe_webhook",
+    {
+      title: "Create Stripe webhook",
+      description:
+        "Create a webhook endpoint in the environment's Stripe mode. The result includes the whsec_ " +
+        "signing secret which Stripe shows ONLY ONCE — store it as an env var immediately " +
+        "(e.g. set_vercel_env_var STRIPE_WEBHOOK_SECRET). It never appears in the audit log. " +
+        "LIVE-mode writes require approval.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        url: nonEmptyString("HTTPS endpoint URL Stripe should call"),
+        enabled_events: z
+          .array(nonEmptyString())
+          .min(1)
+          .describe('Stripe event names, e.g. ["checkout.session.completed", "invoice.paid"]'),
+        description: z.string().optional(),
+      },
+    },
+    guard((a: any) =>
+      pa.stripeCreateWebhook(store, {
+        project: a.project,
+        environment: a.environment,
+        url: a.url,
+        enabledEvents: a.enabled_events,
+        description: a.description,
+      }),
+    ),
+  );
+  server.registerTool(
+    "list_stripe_webhooks",
+    {
+      title: "List Stripe webhooks",
+      description:
+        "List webhook endpoints in the environment's Stripe mode (signing secrets are never returned by list).",
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
+    },
+    guard((a: any) => pa.stripeListWebhooks(store, a)),
   );
   server.registerTool(
     "create_stripe_product",

@@ -218,7 +218,7 @@ function assertPolicyEffect(effect: unknown): asserts effect is PolicyEffect {
 }
 
 function assertCapability(capability: unknown): asserts capability is Capability {
-  const capabilities: Capability[] = ["read", "write", "deploy", "env_change", "delete", "destructive_sql"];
+  const capabilities: Capability[] = ["read", "write", "deploy", "env_change", "delete", "destructive_sql", "purchase"];
   if (typeof capability !== "string" || !capabilities.includes(capability as Capability)) {
     throw new OfflocalError(
       `Invalid policy capability "${String(capability)}". Expected one of: ${capabilities.join(", ")}.`,

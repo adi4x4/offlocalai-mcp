@@ -39,6 +39,10 @@ export function defaultEnvVar(provider: string): string {
       return "STRIPE_TEST_SECRET_KEY";
     case "railway":
       return "RAILWAY_TOKEN";
+    case "namecheap":
+      return "NAMECHEAP_API_KEY";
+    case "neon":
+      return "NEON_API_KEY";
     default:
       return `${provider.toUpperCase()}_TOKEN`;
   }

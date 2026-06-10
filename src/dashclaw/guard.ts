@@ -22,6 +22,7 @@ export function sqlFingerprint(sql: string): string {
 }
 
 function actionType(ctx: ActionContext): string {
+  if (ctx.capability === "purchase") return "provider_purchase";
   if (ctx.provider === "stripe" && ctx.live && ctx.capability === "write") return "stripe_live_write";
   if (ctx.provider === "supabase" && ctx.capability === "destructive_sql") return "database_destructive_sql";
   if (ctx.provider === "supabase" && ctx.capability === "write") return "database_write";
@@ -33,6 +34,7 @@ function actionType(ctx: ActionContext): string {
 }
 
 function riskScore(ctx: ActionContext): number {
+  if (ctx.capability === "purchase") return 95;
   if (ctx.capability === "destructive_sql" || ctx.capability === "delete") return 95;
   if (ctx.live === true) return 90;
   if (ctx.capability === "deploy" && ctx.environment.isProduction) return 85;
@@ -44,6 +46,7 @@ function riskScore(ctx: ActionContext): number {
 }
 
 function isReversible(ctx: ActionContext): boolean {
+  if (ctx.capability === "purchase") return false;
   if (ctx.capability === "destructive_sql" || ctx.capability === "delete") return false;
   if (ctx.live === true) return false;
   if (ctx.environment.isProduction && (ctx.capability === "deploy" || ctx.capability === "env_change")) return false;
@@ -57,6 +60,7 @@ export function sanitizeDashclawText(value: string): string {
       "[redacted]",
     )
     .replace(/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_]+/g, "[redacted]")
+    .replace(/\bwhsec_[A-Za-z0-9]+/g, "[redacted]")
     .replace(/\b(?:postgres|postgresql|mysql|mongodb|redis):\/\/[^\s,;}]+/gi, "[redacted]")
     .replace(
       /\b[A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_?KEY|ACCESS_TOKEN|DATABASE_URL)[A-Z0-9_]*\b/gi,

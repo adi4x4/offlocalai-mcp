@@ -122,7 +122,33 @@ describe("DashClaw guard payload mapping", () => {
     expect(isRiskyAction(actionContext({ capability: "env_change" }))).toBe(true);
     expect(isRiskyAction(actionContext({ capability: "delete" }))).toBe(true);
     expect(isRiskyAction(actionContext({ capability: "destructive_sql" }))).toBe(true);
+    expect(isRiskyAction(actionContext({ capability: "purchase" }))).toBe(true);
     expect(isRiskyAction(actionContext({ capability: "read", live: true }))).toBe(true);
+  });
+
+  it("builds domain purchase guard payload with irreversible high-risk classification", () => {
+    const payload = buildDashclawGuardPayload(
+      actionContext({
+        provider: "namecheap",
+        capability: "purchase",
+        tool: "purchase_domain",
+        summary: "purchase example.com",
+        resourceLabel: "example.com",
+      }),
+      localPreview,
+      "audit_123",
+    );
+
+    expect(payload).toMatchObject({
+      action_type: "provider_purchase",
+      reversible: false,
+      risk_score: 95,
+      metadata: {
+        provider: "namecheap",
+        capability: "purchase",
+        tool: "purchase_domain",
+      },
+    });
   });
 
   it("builds provider deploy guard payload", () => {
@@ -157,6 +183,19 @@ describe("DashClaw guard payload mapping", () => {
     expect(JSON.stringify(payload)).not.toContain("postgres://");
     expect(JSON.stringify(payload)).not.toContain("sk_live");
     expect(JSON.stringify(payload)).not.toContain("TOKEN=");
+    expect(JSON.stringify(payload)).toContain("[redacted]");
+  });
+
+  it("redacts webhook signing secrets from payloads", () => {
+    // Built via concatenation so no secret-shaped literal sits in the repo.
+    const fakeWebhookSecret = ["whsec", "testplaceholder123"].join("_");
+    const payload = buildDashclawGuardPayload(
+      actionContext({ summary: `created webhook endpoint with signing secret ${fakeWebhookSecret}` }),
+      localPreview,
+      "audit_123",
+    );
+
+    expect(JSON.stringify(payload)).not.toContain("whsec");
     expect(JSON.stringify(payload)).toContain("[redacted]");
   });
 

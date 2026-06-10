@@ -4,6 +4,7 @@ import { freshStore } from "./helpers.js";
 
 type RegisteredTool = {
   config: {
+    description?: string;
     inputSchema: Record<string, { safeParse: (value: unknown) => { success: boolean } }>;
   };
 };
@@ -79,6 +80,25 @@ describe("MCP tool schemas", () => {
     expect(tools.has("list_github_branches")).toBe(true);
     expect(tools.has("get_github_status_checks")).toBe(true);
     expect(tools.has("discover_railway_resources")).toBe(true);
+    expect(tools.has("list_neon_projects")).toBe(true);
+    expect(tools.has("create_neon_project")).toBe(true);
+    expect(tools.has("get_neon_connection_uri")).toBe(true);
+    expect(tools.has("check_domain_availability")).toBe(true);
+    expect(tools.has("list_namecheap_domains")).toBe(true);
+    expect(tools.has("purchase_domain")).toBe(true);
+    expect(tools.has("get_dns_records")).toBe(true);
+    expect(tools.has("set_dns_records")).toBe(true);
+    expect(tools.get("set_dns_records")!.config.description).toMatch(/replaces all/i);
+    expect(inputSchema("purchase_domain").domain.safeParse(" ").success).toBe(false);
+    expect(tools.has("create_vercel_project")).toBe(true);
+    expect(tools.has("add_vercel_domain")).toBe(true);
+    expect(tools.has("create_stripe_webhook")).toBe(true);
+    expect(tools.has("list_stripe_webhooks")).toBe(true);
+    expect(tools.get("create_stripe_webhook")!.config.description).toMatch(/env var/i);
+    expect(inputSchema("create_stripe_webhook").url.safeParse(" ").success).toBe(false);
+    expect(inputSchema("add_vercel_domain").domain.safeParse("").success).toBe(false);
+    expect(inputSchema("get_neon_connection_uri").neon_project_id.safeParse(" ").success).toBe(false);
+    expect(inputSchema("get_neon_connection_uri").database_name.safeParse("").success).toBe(false);
     expect(tools.has("get_supabase_logs")).toBe(true);
     expect(tools.has("apply_supabase_migration")).toBe(true);
     expect(tools.has("list_stripe_customers")).toBe(true);
