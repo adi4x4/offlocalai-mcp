@@ -54,6 +54,32 @@ Only add tokens for providers you actually use — see
 [.env.example](../.env.example) for the full list with instructions per
 provider. Restart your agent after editing.
 
+## Step 2b — Or set it up ONCE for every project (recommended)
+
+Tired of per-project config? Two commands and you never touch this again.
+
+**1. Register the server globally** (Claude Code user scope — loads in every
+project automatically, no `.mcp.json` needed anywhere):
+
+```bash
+claude mcp add --scope user offlocal -- node C:/path/to/offlocalai-mcp/dist/index.js
+```
+
+**2. Store your tokens once** as user environment variables (Windows):
+
+```powershell
+powershell -File scripts/setup-tokens.ps1
+```
+
+The script walks you through every provider — paste a token or press Enter to
+skip. Every project and every future session inherits them; re-run it any time
+to add or rotate a token. Restart your terminal + agent afterwards, then ask
+your agent to "run the offlocal doctor" — it tells you exactly what's
+configured and what's missing.
+
+(macOS/Linux: put `export NEON_API_KEY=...` lines in your `~/.zshrc` /
+`~/.bashrc` instead.)
+
 ## Step 3 — Say hello
 
 In your agent, ask:
