@@ -22,7 +22,7 @@ process. Your provider tokens stay in environment variables on your machine.
 ## 2. What this server does
 
 It is **one governed front door** to your real infrastructure: GitHub, Vercel,
-Supabase, Stripe, Railway, Neon, and Namecheap. The agent never calls those
+Supabase, Stripe, Railway, Neon, Upstash Redis/QStash, Cloudflare R2, Namecheap, Sentry, PostHog, Clerk, Resend, and Twilio. The agent never calls those
 APIs directly — every tool call goes through a single choke point
 (`runGuarded`) that decides whether the action may run and writes an audit
 entry either way.
@@ -103,7 +103,10 @@ Tokens are read from environment variables at call time and are **never
 persisted** to `.offlocal/` or sent to DashClaw. See [.env.example](../.env.example)
 for the full list (`GITHUB_TOKEN`, `VERCEL_TOKEN`, `SUPABASE_ACCESS_TOKEN`,
 `STRIPE_TEST_SECRET_KEY` / `STRIPE_LIVE_SECRET_KEY`, `RAILWAY_TOKEN`,
-`NEON_API_KEY`, `NAMECHEAP_API_USER` / `NAMECHEAP_API_KEY` /
+`NEON_API_KEY`, `UPSTASH_EMAIL`, `UPSTASH_API_KEY`, `QSTASH_TOKEN`,
+`QSTASH_CURRENT_SIGNING_KEY`, `QSTASH_NEXT_SIGNING_KEY`, `CLOUDFLARE_API_TOKEN`,
+`R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `SENTRY_AUTH_TOKEN`,
+`POSTHOG_PERSONAL_API_KEY`, `CLERK_SECRET_KEY`, `RESEND_API_KEY`, `TWILIO_AUTH_TOKEN`, `NAMECHEAP_API_USER` / `NAMECHEAP_API_KEY` /
 `NAMECHEAP_CLIENT_IP` / `NAMECHEAP_SANDBOX`, `DASHCLAW_*`).
 
 Some tool **results** legitimately contain secrets — that is the point of
@@ -113,6 +116,21 @@ calling agent **only**. A sanitizer strips secret-shaped strings
 (`postgres://...`, `sk_live_...`, `whsec_...`, `FOO_TOKEN=...`) from every
 audit summary and every DashClaw payload, and tests assert it
 (`test/providers.test.ts`, `test/dashclaw.test.ts`).
+Sentry client-key tools intentionally return only public DSNs suitable for
+`SENTRY_DSN`; returned secret DSNs are stripped before the tool result.
+PostHog project tools intentionally return the public project token for
+`NEXT_PUBLIC_POSTHOG_KEY`; private `secret_api_token` fields are stripped before
+the tool result.
+Upstash Redis env tools return REST tokens for app wiring only; those tokens are
+kept out of audit summaries and DashClaw payloads.
+QStash env tools return the app token and signing keys for job delivery and
+request verification; QStash tokens, signing keys, schedule bodies, and
+forwarded headers are kept out of audit summaries and DashClaw payloads.
+Cloudflare R2 env tools return S3-compatible app credentials from
+`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY`; Cloudflare API tokens and R2 secret
+access keys are kept out of audit summaries and DashClaw payloads.
+Clerk tools return public publishable-key env wiring and user/domain summaries;
+`CLERK_SECRET_KEY` is never returned, persisted, audited, or sent to DashClaw.
 
 Next: the [launch playbook](launch-playbook.md) walks an entire
 domain-to-production launch through these tools.

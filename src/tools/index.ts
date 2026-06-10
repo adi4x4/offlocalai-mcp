@@ -41,19 +41,53 @@ function guard<A>(fn: (args: A) => unknown | Promise<unknown>) {
   };
 }
 
-const provider = z.enum(["github", "vercel", "supabase", "stripe", "railway", "namecheap", "neon"]);
+const provider = z.enum([
+  "github",
+  "vercel",
+  "supabase",
+  "stripe",
+  "railway",
+  "namecheap",
+  "neon",
+  "upstash",
+  "cloudflare_r2",
+  "sentry",
+  "posthog",
+  "resend",
+  "twilio",
+  "clerk",
+]);
 const capability = z.enum(["read", "write", "deploy", "env_change", "delete", "destructive_sql", "purchase"]);
+const httpMethod = z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const nonEmptyString = (description?: string) => {
   const schema = z.string().trim().min(1);
   return description ? schema.describe(description) : schema;
 };
 const optionalNonEmptyString = (description?: string) => nonEmptyString(description).optional();
+const r2BucketName = (description?: string) => {
+  const schema = z
+    .string()
+    .trim()
+    .min(3)
+    .max(63)
+    .regex(/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/)
+    .refine((value) => !value.includes(".."));
+  return description ? schema.describe(description) : schema;
+};
 const positiveInt = (description?: string) => {
   const schema = z.number().int().positive();
   return description ? schema.describe(description) : schema;
 };
 const nonNegativeInt = (description?: string) => {
   const schema = z.number().int().nonnegative();
+  return description ? schema.describe(description) : schema;
+};
+const envVarName = (description?: string) => {
+  const schema = z
+    .string()
+    .trim()
+    .min(1)
+    .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
   return description ? schema.describe(description) : schema;
 };
 
@@ -245,6 +279,26 @@ export function registerTools(server: McpServer, store: Store): void {
       status: "ok",
       connection: svc.createConnection(store, a),
     })),
+  );
+
+  server.registerTool(
+    "set_app_env_vars",
+    {
+      title: "Set app env vars",
+      description:
+        "Set multiple environment variables on the mapped Vercel or Railway app under one governed env_change action. " +
+        "Values are sent to the target provider but are not included in DashClaw/audit summaries. Production changes require approval by default.",
+      inputSchema: {
+        project: optionalNonEmptyString(),
+        environment: nonEmptyString("Environment id or name"),
+        targetProvider: z.enum(["vercel", "railway"]),
+        vars: z.array(z.object({ key: envVarName("Environment variable name"), value: z.string() })).min(1).max(50),
+        target: z.array(z.enum(["production", "preview", "development"])).min(1).optional(),
+        serviceId: optionalNonEmptyString("Optional Railway service id override"),
+        skipDeploys: z.boolean().optional(),
+      },
+    },
+    guard((a: any) => pa.setAppEnvVars(store, a)),
   );
 
   // --- Policy --------------------------------------------------------------
@@ -689,6 +743,55 @@ function registerProviderTools(server: McpServer, store: Store): void {
     },
     guard((a: any) => pa.githubStatusChecks(store, a)),
   );
+  server.registerTool(
+    "list_github_workflow_runs",
+    {
+      title: "List GitHub Actions workflow runs",
+      description: "List GitHub Actions workflow runs for the mapped repo with optional branch, event, and status filters.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        branch: optionalNonEmptyString("Optional branch filter"),
+        event: optionalNonEmptyString("Optional event filter such as push or pull_request"),
+        status: optionalNonEmptyString("Optional Actions status or conclusion filter"),
+        limit: positiveInt().optional(),
+      },
+    },
+    guard((a: any) => pa.githubWorkflowRuns(store, a)),
+  );
+  server.registerTool(
+    "list_github_workflow_jobs",
+    {
+      title: "List GitHub Actions workflow jobs",
+      description: "List jobs and step metadata for a GitHub Actions workflow run without downloading raw log bodies.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        runId: positiveInt("GitHub Actions workflow run id"),
+        filter: z.enum(["latest", "all"]).optional(),
+        limit: positiveInt().optional(),
+      },
+    },
+    guard((a: any) => pa.githubWorkflowJobs(store, a)),
+  );
+  server.registerTool(
+    "rerun_github_workflow_run",
+    {
+      title: "Rerun GitHub Actions workflow run",
+      description: "Rerun a GitHub Actions workflow run for the mapped repo. Requires write policy approval when configured.",
+      inputSchema: { project: proj, environment: env, runId: positiveInt("GitHub Actions workflow run id") },
+    },
+    guard((a: any) => pa.githubRerunWorkflowRun(store, a)),
+  );
+  server.registerTool(
+    "cancel_github_workflow_run",
+    {
+      title: "Cancel GitHub Actions workflow run",
+      description: "Cancel a GitHub Actions workflow run for the mapped repo. Requires write policy approval when configured.",
+      inputSchema: { project: proj, environment: env, runId: positiveInt("GitHub Actions workflow run id") },
+    },
+    guard((a: any) => pa.githubCancelWorkflowRun(store, a)),
+  );
 
   // Vercel
   server.registerTool(
@@ -1081,6 +1184,240 @@ function registerProviderTools(server: McpServer, store: Store): void {
     ),
   );
 
+  // Upstash Redis
+  server.registerTool(
+    "list_upstash_redis_databases",
+    {
+      title: "List Upstash Redis databases",
+      description: "List Upstash Redis databases visible to the Developer API key. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        apiHost: optionalNonEmptyString("Optional Upstash API host override"),
+      },
+    },
+    guard((a: any) => pa.upstashListRedisDatabases(store, a)),
+  );
+  server.registerTool(
+    "create_upstash_redis_database",
+    {
+      title: "Create Upstash Redis database",
+      description:
+        "Create an Upstash Redis database and return UPSTASH_REDIS_REST_URL/UPSTASH_REDIS_REST_TOKEN wiring. Production setup requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        apiHost: optionalNonEmptyString("Optional Upstash API host override"),
+        databaseName: nonEmptyString("Redis database name"),
+        platform: z.enum(["aws", "gcp"]).describe("Cloud platform"),
+        primaryRegion: nonEmptyString("Primary region, e.g. us-east-1"),
+        readRegions: z.array(nonEmptyString("Read region")).optional(),
+        plan: optionalNonEmptyString("Optional plan, e.g. free or payg"),
+        budget: nonNegativeInt("Optional monthly budget").optional(),
+        eviction: z.boolean().optional().describe("Whether to enable eviction"),
+        tls: z.boolean().optional().describe("Whether to enable TLS"),
+      },
+    },
+    guard((a: any) => pa.upstashCreateRedisDatabase(store, a)),
+  );
+  server.registerTool(
+    "get_upstash_redis_env",
+    {
+      title: "Get Upstash Redis env",
+      description:
+        "Return env wiring for UPSTASH_REDIS_REST_URL, UPSTASH_REDIS_REST_TOKEN, and UPSTASH_REDIS_READ_ONLY_REST_TOKEN.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        databaseId: optionalNonEmptyString("Upstash Redis database id; defaults to mapped databaseId"),
+      },
+    },
+    guard((a: any) => pa.upstashGetRedisEnv(store, a)),
+  );
+
+  server.registerTool(
+    "get_upstash_qstash_env",
+    {
+      title: "Get Upstash QStash env",
+      description:
+        "Return env wiring for QSTASH_URL, QSTASH_TOKEN, QSTASH_CURRENT_SIGNING_KEY, and QSTASH_NEXT_SIGNING_KEY.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+      },
+    },
+    guard((a: any) => pa.upstashGetQstashEnv(store, a)),
+  );
+  server.registerTool(
+    "list_upstash_qstash_schedules",
+    {
+      title: "List Upstash QStash schedules",
+      description: "List QStash cron schedules without returning stored request bodies or forwarded headers.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+      },
+    },
+    guard((a: any) => pa.upstashListQstashSchedules(store, a)),
+  );
+  server.registerTool(
+    "create_upstash_qstash_schedule",
+    {
+      title: "Create Upstash QStash schedule",
+      description:
+        "Create a QStash cron schedule for an app endpoint. Request bodies and forwarded headers are redacted in QStash; production setup requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        destination: nonEmptyString("Public destination URL or QStash URL group name"),
+        cron: nonEmptyString("Cron expression, e.g. CRON_TZ=America/New_York 0 9 * * *"),
+        scheduleId: optionalNonEmptyString("Optional stable schedule id"),
+        body: optionalNonEmptyString("Optional raw request body"),
+        contentType: optionalNonEmptyString("Optional Content-Type; defaults to application/json"),
+        method: httpMethod.optional().describe("HTTP method QStash should use when calling the destination"),
+        retries: nonNegativeInt("Optional retry count").optional(),
+      },
+    },
+    guard((a: any) => pa.upstashCreateQstashSchedule(store, a)),
+  );
+
+  // Cloudflare R2 object storage
+  server.registerTool(
+    "list_cloudflare_r2_buckets",
+    {
+      title: "List Cloudflare R2 buckets",
+      description: "List Cloudflare R2 buckets visible to CLOUDFLARE_API_TOKEN. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        accountId: optionalNonEmptyString("Cloudflare account id; defaults to mapped accountId"),
+        cursor: optionalNonEmptyString("Pagination cursor"),
+        limit: positiveInt("Page size").optional(),
+      },
+    },
+    guard((a: any) => pa.cloudflareR2ListBuckets(store, a)),
+  );
+  server.registerTool(
+    "create_cloudflare_r2_bucket",
+    {
+      title: "Create Cloudflare R2 bucket",
+      description:
+        "Create a Cloudflare R2 bucket and return S3-compatible app env wiring. Production storage setup requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        accountId: optionalNonEmptyString("Cloudflare account id; defaults to mapped accountId"),
+        bucketName: r2BucketName("Lowercase R2 bucket name"),
+        locationHint: optionalNonEmptyString("Optional R2 location hint, e.g. enam"),
+        storageClass: optionalNonEmptyString("Optional R2 storage class, e.g. Standard"),
+        jurisdiction: z.enum(["default", "eu", "fedramp"]).optional().describe("R2 jurisdiction"),
+      },
+    },
+    guard((a: any) => pa.cloudflareR2CreateBucket(store, a)),
+  );
+  server.registerTool(
+    "get_cloudflare_r2_env",
+    {
+      title: "Get Cloudflare R2 env",
+      description:
+        "Return R2 app env wiring for R2_ACCOUNT_ID, R2_BUCKET_NAME, R2_ENDPOINT, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        accountId: optionalNonEmptyString("Cloudflare account id; defaults to mapped accountId"),
+        bucketName: optionalNonEmptyString("R2 bucket name; defaults to mapped bucketName"),
+      },
+    },
+    guard((a: any) => pa.cloudflareR2GetEnv(store, a)),
+  );
+  server.registerTool(
+    "list_cloudflare_r2_objects",
+    {
+      title: "List Cloudflare R2 objects",
+      description: "List sanitized object summaries for the mapped R2 bucket. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        accountId: optionalNonEmptyString("Cloudflare account id; defaults to mapped accountId"),
+        bucketName: optionalNonEmptyString("R2 bucket name; defaults to mapped bucketName"),
+        prefix: optionalNonEmptyString("Optional object key prefix"),
+        cursor: optionalNonEmptyString("Pagination cursor"),
+        limit: positiveInt("Page size").optional(),
+      },
+    },
+    guard((a: any) => pa.cloudflareR2ListObjects(store, a)),
+  );
+
+  // Clerk auth
+  server.registerTool(
+    "get_clerk_app_env",
+    {
+      title: "Get Clerk app env",
+      description:
+        "Return client-safe Clerk env wiring for NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, sign-in/sign-up URLs, and the optional Frontend API URL.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+      },
+    },
+    guard((a: any) => pa.clerkGetAppEnv(store, a)),
+  );
+  server.registerTool(
+    "list_clerk_users",
+    {
+      title: "List Clerk users",
+      description: "List sanitized Clerk user summaries for the mapped app. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        limit: positiveInt().optional(),
+        offset: nonNegativeInt().optional(),
+        query: optionalNonEmptyString("Optional Clerk user search query"),
+      },
+    },
+    guard((a: any) => pa.clerkListUsers(store, a)),
+  );
+  server.registerTool(
+    "list_clerk_domains",
+    {
+      title: "List Clerk domains",
+      description: "List primary and satellite domains for the mapped Clerk instance. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+      },
+    },
+    guard((a: any) => pa.clerkListDomains(store, a)),
+  );
+  server.registerTool(
+    "list_clerk_redirect_urls",
+    {
+      title: "List Clerk redirect URLs",
+      description: "List Clerk whitelisted redirect URLs for OAuth/native auth flows. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        limit: positiveInt().optional(),
+        offset: nonNegativeInt().optional(),
+      },
+    },
+    guard((a: any) => pa.clerkListRedirectUrls(store, a)),
+  );
+  server.registerTool(
+    "create_clerk_redirect_url",
+    {
+      title: "Create Clerk redirect URL",
+      description:
+        "Whitelist a Clerk redirect URL for OAuth/native auth flows. Production auth setup requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        url: nonEmptyString("Full redirect URL, e.g. https://app.example.com/callback or my-app://callback"),
+      },
+    },
+    guard((a: any) => pa.clerkCreateRedirectUrl(store, a)),
+  );
+
   // Supabase
   server.registerTool(
     "list_supabase_projects",
@@ -1246,5 +1583,342 @@ function registerProviderTools(server: McpServer, store: Store): void {
       },
     },
     guard((a: any) => pa.stripeCreatePrice(store, a)),
+  );
+
+  // Sentry
+  server.registerTool(
+    "list_sentry_projects",
+    {
+      title: "List Sentry projects",
+      description: "List Sentry projects in the mapped organization. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        limit: positiveInt().optional(),
+        query: optionalNonEmptyString("Optional project name/slug filter"),
+      },
+    },
+    guard((a: any) => pa.sentryListProjects(store, a)),
+  );
+  server.registerTool(
+    "create_sentry_project",
+    {
+      title: "Create Sentry project",
+      description:
+        "Create a Sentry observability project. Production observability setup requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        name: nonEmptyString("Sentry project name"),
+        slug: optionalNonEmptyString("Optional Sentry project slug"),
+        platform: optionalNonEmptyString("Optional Sentry platform, e.g. node-express or javascript-nextjs"),
+        teamSlug: optionalNonEmptyString("Optional Sentry team slug; defaults to mapped teamSlug"),
+        defaultRules: z.boolean().optional().describe("Whether Sentry should create default alert rules"),
+      },
+    },
+    guard((a: any) => pa.sentryCreateProject(store, a)),
+  );
+  server.registerTool(
+    "list_sentry_client_keys",
+    {
+      title: "List Sentry client keys",
+      description: "List Sentry client keys for a project, returning public DSNs only. Secret DSNs are stripped.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        projectSlug: optionalNonEmptyString("Sentry project slug; defaults to mapped projectSlug"),
+        status: z.enum(["active", "inactive"]).optional(),
+      },
+    },
+    guard((a: any) => pa.sentryListClientKeys(store, a)),
+  );
+  server.registerTool(
+    "create_sentry_client_key",
+    {
+      title: "Create Sentry client key",
+      description:
+        "Create a Sentry client key and return its public DSN for SENTRY_DSN wiring. Production setup requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        projectSlug: optionalNonEmptyString("Sentry project slug; defaults to mapped projectSlug"),
+        name: optionalNonEmptyString("Optional client key name, e.g. web"),
+        useCase: z.enum(["user", "profiling", "tempest", "demo"]).optional(),
+        rateLimitWindow: positiveInt("Rate-limit window in seconds; pair with rateLimitCount").optional(),
+        rateLimitCount: positiveInt("Maximum accepted events during rateLimitWindow").optional(),
+      },
+    },
+    guard((a: any) => pa.sentryCreateClientKey(store, a)),
+  );
+  server.registerTool(
+    "list_sentry_releases",
+    {
+      title: "List Sentry releases",
+      description: "List Sentry releases for the mapped organization. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        query: optionalNonEmptyString("Optional starts-with filter for release version"),
+      },
+    },
+    guard((a: any) => pa.sentryListReleases(store, a)),
+  );
+  server.registerTool(
+    "create_sentry_release",
+    {
+      title: "Create Sentry release",
+      description:
+        "Create a Sentry release marker for the mapped project so issues and regressions correlate to a shipped version.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        version: nonEmptyString("Release version, e.g. acme-api@<git-sha>"),
+        projects: z.array(nonEmptyString("Sentry project slug")).min(1).optional(),
+        ref: optionalNonEmptyString("Optional commit SHA/ref"),
+        url: optionalNonEmptyString("Optional URL for the release/source commit"),
+        dateReleased: optionalNonEmptyString("Optional ISO timestamp when the release went live"),
+      },
+    },
+    guard((a: any) => pa.sentryCreateRelease(store, a)),
+  );
+  server.registerTool(
+    "list_sentry_deploys",
+    {
+      title: "List Sentry deploys",
+      description: "List deploy markers for a Sentry release. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        version: nonEmptyString("Release version"),
+      },
+    },
+    guard((a: any) => pa.sentryListDeploys(store, a)),
+  );
+  server.registerTool(
+    "create_sentry_deploy",
+    {
+      title: "Create Sentry deploy",
+      description:
+        "Create a Sentry deploy marker for a release/environment. Production deploy markers require approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        version: nonEmptyString("Release version"),
+        deployEnvironment: nonEmptyString("Sentry deploy environment, e.g. production or staging"),
+        name: optionalNonEmptyString("Optional deploy name, e.g. vercel dpl_..."),
+        url: optionalNonEmptyString("Optional deployed URL"),
+        dateStarted: optionalNonEmptyString("Optional ISO timestamp when deployment started"),
+        dateFinished: optionalNonEmptyString("Optional ISO timestamp when deployment finished"),
+        projects: z.array(nonEmptyString("Sentry project slug")).min(1).optional(),
+      },
+    },
+    guard((a: any) => pa.sentryCreateDeploy(store, a)),
+  );
+
+  // PostHog
+  server.registerTool(
+    "list_posthog_projects",
+    {
+      title: "List PostHog projects",
+      description: "List PostHog projects in the mapped organization. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        limit: positiveInt().optional(),
+        search: optionalNonEmptyString("Optional project name filter"),
+      },
+    },
+    guard((a: any) => pa.posthogListProjects(store, a)),
+  );
+  server.registerTool(
+    "create_posthog_project",
+    {
+      title: "Create PostHog project",
+      description:
+        "Create a PostHog analytics project and return NEXT_PUBLIC_POSTHOG_KEY/NEXT_PUBLIC_POSTHOG_HOST wiring. Production setup requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        name: nonEmptyString("PostHog project name"),
+        productDescription: optionalNonEmptyString("Optional product description"),
+        appUrls: z.array(nonEmptyString("Application URL")).optional(),
+        timezone: optionalNonEmptyString("Optional timezone, e.g. UTC"),
+        sessionRecording: z.boolean().optional().describe("Whether to opt in to PostHog session recording"),
+      },
+    },
+    guard((a: any) => pa.posthogCreateProject(store, a)),
+  );
+  server.registerTool(
+    "get_posthog_project_env",
+    {
+      title: "Get PostHog project env",
+      description:
+        "Return client-safe PostHog env wiring for NEXT_PUBLIC_POSTHOG_KEY, NEXT_PUBLIC_POSTHOG_HOST, and POSTHOG_PROJECT_ID.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        projectId: optionalNonEmptyString("PostHog project id; defaults to mapped projectId"),
+      },
+    },
+    guard((a: any) => pa.posthogGetProjectEnv(store, a)),
+  );
+  server.registerTool(
+    "list_posthog_feature_flags",
+    {
+      title: "List PostHog feature flags",
+      description: "List feature flags for the mapped PostHog project. Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        projectId: optionalNonEmptyString("PostHog project id; defaults to mapped projectId"),
+        limit: positiveInt().optional(),
+        search: optionalNonEmptyString("Optional flag key/name search"),
+        active: z.enum(["STALE", "false", "true"]).optional(),
+        type: z.enum(["boolean", "experiment", "multivariant", "remote_config"]).optional(),
+      },
+    },
+    guard((a: any) => pa.posthogListFeatureFlags(store, a)),
+  );
+  server.registerTool(
+    "create_posthog_feature_flag",
+    {
+      title: "Create PostHog feature flag",
+      description:
+        "Create a PostHog feature flag, inactive by default. Production flag writes require approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        projectId: optionalNonEmptyString("PostHog project id; defaults to mapped projectId"),
+        key: nonEmptyString("Feature flag key used in application code"),
+        name: optionalNonEmptyString("Optional display name"),
+        active: z.boolean().optional().describe("Defaults to false when omitted"),
+        filters: z.record(z.unknown()).optional().describe("Optional PostHog feature flag filters object"),
+        tags: z.array(nonEmptyString("PostHog tag")).optional(),
+        isRemoteConfiguration: z.boolean().optional(),
+      },
+    },
+    guard((a: any) => pa.posthogCreateFeatureFlag(store, a)),
+  );
+
+  // Resend
+  server.registerTool(
+    "list_resend_domains",
+    {
+      title: "List Resend domains",
+      description: "List Resend email domains and their sending/receiving status for the mapped account.",
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
+    },
+    guard((a: any) => pa.resendListDomains(store, a)),
+  );
+  server.registerTool(
+    "create_resend_domain",
+    {
+      title: "Create Resend domain",
+      description:
+        "Create a Resend sending domain and return the DNS records to set. Production email/DNS setup requires approval.",
+      inputSchema: { project: proj, environment: env, name: nonEmptyString("Domain name, e.g. example.com") },
+    },
+    guard((a: any) => pa.resendCreateDomain(store, a)),
+  );
+  server.registerTool(
+    "verify_resend_domain",
+    {
+      title: "Verify Resend domain",
+      description: "Trigger Resend domain verification after DNS records have been created.",
+      inputSchema: { project: proj, environment: env, domainId: nonEmptyString("Resend domain id") },
+    },
+    guard((a: any) => pa.resendVerifyDomain(store, a)),
+  );
+  server.registerTool(
+    "send_resend_email",
+    {
+      title: "Send Resend email",
+      description:
+        "Send an outbound email through Resend. This is a live external communication and requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        from: optionalNonEmptyString("From header; defaults to mapped defaultFrom"),
+        to: z.array(nonEmptyString("Recipient email address")).min(1),
+        subject: nonEmptyString("Email subject"),
+        html: optionalNonEmptyString("HTML message body"),
+        text: optionalNonEmptyString("Plain text message body"),
+        cc: z.array(nonEmptyString("CC recipient email address")).min(1).optional(),
+        bcc: z.array(nonEmptyString("BCC recipient email address")).min(1).optional(),
+        replyTo: z.array(nonEmptyString("Reply-To email address")).min(1).optional(),
+      },
+    },
+    guard((a: any) => pa.resendSendEmail(store, a)),
+  );
+
+  // Twilio
+  server.registerTool(
+    "list_twilio_phone_numbers",
+    {
+      title: "List Twilio phone numbers",
+      description: "List Twilio phone numbers and their current SMS/voice webhook URLs for the mapped account.",
+      inputSchema: { project: proj, environment: env, limit: positiveInt().optional() },
+    },
+    guard((a: any) => pa.twilioListPhoneNumbers(store, a)),
+  );
+  server.registerTool(
+    "update_twilio_phone_number_webhooks",
+    {
+      title: "Update Twilio phone number webhooks",
+      description:
+        "Wire a Twilio phone number to your app's inbound SMS and/or voice webhook URLs. " +
+        "Production changes require approval.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        phoneNumberSid: nonEmptyString("Twilio incoming phone number SID, e.g. PN..."),
+        smsUrl: optionalNonEmptyString("HTTPS endpoint Twilio should call for inbound SMS"),
+        voiceUrl: optionalNonEmptyString("HTTPS endpoint Twilio should call for inbound voice"),
+      },
+    },
+    guard((a: any) =>
+      pa.twilioUpdatePhoneNumberWebhooks(store, {
+        project: a.project,
+        environment: a.environment,
+        phoneNumberSid: a.phoneNumberSid,
+        smsUrl: a.smsUrl,
+        voiceUrl: a.voiceUrl,
+      }),
+    ),
+  );
+  server.registerTool(
+    "send_twilio_sms",
+    {
+      title: "Send Twilio SMS",
+      description:
+        "Send an outbound SMS through Twilio. This is a live external communication and requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        to: nonEmptyString("Recipient phone number in E.164 format"),
+        body: nonEmptyString("Message body"),
+        from: optionalNonEmptyString("Sender phone number; defaults to mapped fromNumber"),
+        messagingServiceSid: optionalNonEmptyString("Messaging Service SID; defaults to mapped messagingServiceSid"),
+        statusCallback: optionalNonEmptyString("Optional delivery status callback URL"),
+      },
+    },
+    guard((a: any) => pa.twilioSendSms(store, a)),
+  );
+  server.registerTool(
+    "create_twilio_call",
+    {
+      title: "Create Twilio call",
+      description:
+        "Create an outbound voice call through Twilio. This is a live external communication and requires approval by default.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        to: nonEmptyString("Recipient phone number in E.164 format"),
+        url: nonEmptyString("TwiML URL Twilio requests when the call connects"),
+        from: optionalNonEmptyString("Caller phone number; defaults to mapped fromNumber"),
+        statusCallback: optionalNonEmptyString("Optional call status callback URL"),
+      },
+    },
+    guard((a: any) => pa.twilioCreateCall(store, a)),
   );
 }

@@ -69,13 +69,20 @@ function optionalPositiveInt(raw: string | undefined, label: string): number | u
 }
 
 const REQUIRED_ENV_VARS = [
-  ["GITHUB_TOKEN", "GitHub fine-grained PAT (Metadata: read, Contents: read)"],
+  ["GITHUB_TOKEN", "GitHub fine-grained PAT (Metadata: read, Contents: read, Actions: read; Actions: write for rerun/cancel)"],
   ["VERCEL_TOKEN", "Vercel account/team token"],
   ["VERCEL_TEAM_ID", "optional — required for team-owned Vercel resources"],
   ["SUPABASE_ACCESS_TOKEN", "Supabase personal access token"],
   ["STRIPE_TEST_SECRET_KEY", "Stripe sk_test_… key"],
   ["STRIPE_LIVE_SECRET_KEY", "Stripe sk_live_… key (only used when policy allows a live write)"],
   ["RAILWAY_TOKEN", "Railway account/workspace token"],
+  ["QSTASH_TOKEN", "Upstash QStash token for background jobs and schedules"],
+  ["QSTASH_CURRENT_SIGNING_KEY", "QStash current signing key for request verification"],
+  ["QSTASH_NEXT_SIGNING_KEY", "QStash next signing key for request verification"],
+  ["CLOUDFLARE_API_TOKEN", "Cloudflare API token for R2 bucket management"],
+  ["R2_ACCESS_KEY_ID", "R2 S3-compatible access key id for app env wiring"],
+  ["R2_SECRET_ACCESS_KEY", "R2 S3-compatible secret access key for app env wiring"],
+  ["CLERK_SECRET_KEY", "Clerk Backend API secret key"],
 ];
 
 /** Print the MCP client config snippet + required env vars after init. */
@@ -106,6 +113,13 @@ function printSetupHelp(serverEntry: string): void {
               STRIPE_TEST_SECRET_KEY: "${STRIPE_TEST_SECRET_KEY}",
               STRIPE_LIVE_SECRET_KEY: "${STRIPE_LIVE_SECRET_KEY}",
               RAILWAY_TOKEN: "${RAILWAY_TOKEN}",
+              QSTASH_TOKEN: "${QSTASH_TOKEN}",
+              QSTASH_CURRENT_SIGNING_KEY: "${QSTASH_CURRENT_SIGNING_KEY}",
+              QSTASH_NEXT_SIGNING_KEY: "${QSTASH_NEXT_SIGNING_KEY}",
+              CLOUDFLARE_API_TOKEN: "${CLOUDFLARE_API_TOKEN}",
+              R2_ACCESS_KEY_ID: "${R2_ACCESS_KEY_ID}",
+              R2_SECRET_ACCESS_KEY: "${R2_SECRET_ACCESS_KEY}",
+              CLERK_SECRET_KEY: "${CLERK_SECRET_KEY}",
             },
           },
         },
@@ -150,13 +164,20 @@ Usage:
   offlocal dashclaw evidence [--project <p>] [--env <e>] [--provider <p>] [--limit <n>]
   offlocal context [project] [--env <e>] [--json]   Print the production-context summary
 
-Providers: github | vercel | supabase | stripe | railway
+Providers: github | vercel | supabase | stripe | railway | namecheap | neon | upstash | cloudflare_r2 | sentry | posthog | resend | twilio | clerk
 Resource JSON examples:
   github:   {"owner":"your-org","repo":"your-repo"}
   vercel:   {"projectId":"your-vercel-project"}
   supabase: {"projectRef":"your_project_ref"}
   stripe:   {"mode":"live"}
   railway:  {"projectId":"your-railway-project-id","environmentId":"...","serviceId":"..."}
+  upstash:  {"databaseId":"your-upstash-redis-database-id","apiHost":"https://api.upstash.com","qstashUrl":"https://qstash.upstash.io"}
+  cloudflare_r2: {"accountId":"your-cloudflare-account-id","bucketName":"your-r2-bucket","publicUrl":"https://assets.example.com"}
+  sentry:   {"organizationSlug":"your-sentry-org","projectSlug":"your-project","teamSlug":"platform"}
+  posthog:  {"organizationId":"your-posthog-org-id","projectId":"12345","apiHost":"https://us.posthog.com","ingestHost":"https://us.i.posthog.com"}
+  resend:   {"domain":"example.com","defaultFrom":"Your App <onboarding@example.com>"}
+  twilio:   {"accountSid":"AC...","fromNumber":"+15551230000","messagingServiceSid":"MG..."}
+  clerk:    {"publishableKey":"pk_test_...","signInUrl":"/sign-in","signUpUrl":"/sign-up"}
 `;
 
 async function main(): Promise<void> {

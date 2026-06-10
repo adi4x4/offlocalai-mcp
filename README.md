@@ -41,7 +41,7 @@ AI coding agent
     → workspace
       → project            (your-project)
         → environment      (staging | production)
-          → provider mappings   (github repo, vercel project, supabase ref, stripe mode)
+          → provider mappings   (github repo, vercel project, supabase ref, stripe mode, r2 bucket, clerk app)
             → policy / safety check   (allow | block | approval_required)
               → provider API action
                 → audit log + project memory
@@ -56,8 +56,8 @@ to a provider call that skips this.
 ## Status: V0
 
 - Local-first and **open source** (Apache 2.0). Runs entirely on your machine.
-- Providers: **GitHub, Vercel, Supabase, Stripe** (direct REST APIs) and
-  **Railway** (GraphQL API).
+- Providers: **GitHub, Vercel, Supabase, Stripe, Neon, Upstash, Namecheap, Sentry, PostHog, Clerk, Resend, Twilio**
+  (direct REST APIs) and **Railway** (GraphQL API).
 - Storage: plain JSON files under `.offlocal/` (zero native deps).
 - Auth: **environment variables only** — tokens are read at call time and never
   written to disk.
@@ -116,7 +116,7 @@ env = { GITHUB_TOKEN = "ghp_your_token", VERCEL_TOKEN = "your_vercel_token" }
 
 | Variable | Provider | Notes |
 |---|---|---|
-| `GITHUB_TOKEN` | GitHub | Fine-grained PAT (Metadata: read, Contents: read) |
+| `GITHUB_TOKEN` | GitHub | Fine-grained PAT (Metadata: read, Contents: read, Actions: read; Actions: write for rerun/cancel) |
 | `VERCEL_TOKEN` | Vercel | Account/team token |
 | `VERCEL_TEAM_ID` | Vercel | Optional; required for team-owned resources |
 | `SUPABASE_ACCESS_TOKEN` | Supabase | Personal access token |
@@ -124,6 +124,19 @@ env = { GITHUB_TOKEN = "ghp_your_token", VERCEL_TOKEN = "your_vercel_token" }
 | `STRIPE_LIVE_SECRET_KEY` | Stripe | `sk_live_...` — only used when policy allows a live write |
 | `RAILWAY_TOKEN` | Railway | Account/workspace token |
 | `NEON_API_KEY` | Neon | API key from console.neon.tech → Account settings → API keys |
+| `UPSTASH_EMAIL` | Upstash | Account email for Developer API Basic auth |
+| `UPSTASH_API_KEY` | Upstash | Developer API key from Account → Management API |
+| `QSTASH_TOKEN` | Upstash QStash | Token for background jobs, cron schedules, and webhook delivery |
+| `QSTASH_CURRENT_SIGNING_KEY` | Upstash QStash | Current signing key for verifying QStash requests |
+| `QSTASH_NEXT_SIGNING_KEY` | Upstash QStash | Next signing key for zero-downtime key rotation |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare R2 | API token for R2 bucket management |
+| `R2_ACCESS_KEY_ID` | Cloudflare R2 | S3-compatible access key id for app env wiring |
+| `R2_SECRET_ACCESS_KEY` | Cloudflare R2 | S3-compatible secret access key for app env wiring |
+| `SENTRY_AUTH_TOKEN` | Sentry | Org auth token for project/client-key setup |
+| `POSTHOG_PERSONAL_API_KEY` | PostHog | Personal API key for project/client env and feature-flag APIs |
+| `CLERK_SECRET_KEY` | Clerk | Backend API secret key; publishable key is mapped per environment |
+| `RESEND_API_KEY` | Resend | API key for transactional email/domain setup |
+| `TWILIO_AUTH_TOKEN` | Twilio | Auth token; map `accountSid` per environment |
 | `NAMECHEAP_API_USER` | Namecheap | Account username (also sent as `UserName`) |
 | `NAMECHEAP_API_KEY` | Namecheap | API key from Profile → Tools → API Access |
 | `NAMECHEAP_CLIENT_IP` | Namecheap | Your current public IP — must be whitelisted in API Access |
@@ -149,7 +162,16 @@ the setup tools for you. For example:
 > "Use offlocal to create a project called **acme-crm** with a **staging** and a
 > **production** environment. Map my Vercel project **acme-crm-preview** to
 > staging and **acme-crm-prod** to production, and map Railway project
-> **`<railway-project-id>`** to production."
+> **`<railway-project-id>`** to production. Map Sentry org
+> **acme** and project **acme-crm** for observability, map Resend domain
+> **example.com** for transactional email, map PostHog organization
+> **`<posthog-org-id>`** and project **`<posthog-project-id>`** for analytics,
+> map Upstash Redis database **`<upstash-database-id>`** for caching,
+> use QStash for background jobs and cron schedules,
+> map Cloudflare R2 bucket **`<r2-bucket>`** for object storage,
+> map Clerk publishable key **`pk_test_...`** for authentication,
+> and map my Twilio account
+> **`AC...`** with sender **`+15551230000`** for SMS/voice."
 
 Then start asking it to do real work:
 
@@ -216,9 +238,14 @@ See [offlocal.ai](https://offlocal.ai).
 
 **GitHub:** `get_github_repo_context`, `get_github_repo_readme`,
 `list_github_repo_files`, `list_github_pull_requests`, `list_github_branches`,
-`get_github_status_checks`
+`get_github_status_checks`, `list_github_workflow_runs`,
+`list_github_workflow_jobs`, `rerun_github_workflow_run`*,
+`cancel_github_workflow_run`*
 
 **App logs:** `get_app_logs`, `get_vercel_logs`, `get_latest_deployment_logs`
+
+**Env wiring:** `set_app_env_vars`* (bulk set validated env vars on mapped
+Vercel/Railway apps without putting values in DashClaw or audit summaries)
 
 **Vercel:** `get_vercel_project_context`, `get_vercel_deployments`,
 `get_vercel_deployment_status`, `get_vercel_deployment_logs`,
@@ -239,9 +266,49 @@ See [offlocal.ai](https://offlocal.ai).
 `create_stripe_webhook`* (create a webhook endpoint; returns the `whsec_` secret once),
 `list_stripe_webhooks` (list webhook endpoints)
 
+**Sentry:** `list_sentry_projects`, `create_sentry_project`*,
+`list_sentry_client_keys`, `create_sentry_client_key`* (returns public
+`SENTRY_DSN` for env-var wiring; secret DSNs are stripped),
+`list_sentry_releases`, `create_sentry_release`*, `list_sentry_deploys`,
+`create_sentry_deploy`*
+
+**PostHog:** `list_posthog_projects`, `create_posthog_project`* (returns
+`NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST`, and
+`POSTHOG_PROJECT_ID` for env-var wiring; private project secrets are stripped),
+`get_posthog_project_env`, `list_posthog_feature_flags`,
+`create_posthog_feature_flag`*
+
+**Resend:** `list_resend_domains`, `create_resend_domain`* (returns DNS records),
+`verify_resend_domain`*, `send_resend_email`* (live external communication)
+
+**Twilio:** `list_twilio_phone_numbers`,
+`update_twilio_phone_number_webhooks`* (wire inbound SMS/voice URLs),
+`send_twilio_sms`* (live external communication), `create_twilio_call`*
+(live external communication)
+
 **Neon:** `list_neon_projects` (list Neon Postgres projects),
 `create_neon_project`* (provision a database; returns the connection URI),
 `get_neon_connection_uri` (fetch a DATABASE_URL; redacted from audit)
+
+**Upstash:** `list_upstash_redis_databases`, `create_upstash_redis_database`*
+(provision serverless Redis and return `UPSTASH_REDIS_REST_URL`,
+`UPSTASH_REDIS_REST_TOKEN`, and `UPSTASH_REDIS_READ_ONLY_REST_TOKEN` for
+env-var wiring), `get_upstash_redis_env`, `get_upstash_qstash_env` (returns
+`QSTASH_URL`, `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, and
+`QSTASH_NEXT_SIGNING_KEY` for app env wiring),
+`list_upstash_qstash_schedules`, `create_upstash_qstash_schedule`*
+(background job / cron delivery setup; request bodies and forwarded headers are
+redacted in QStash)
+
+**Cloudflare R2:** `list_cloudflare_r2_buckets`,
+`create_cloudflare_r2_bucket`* (create object storage and return
+`R2_ACCOUNT_ID`, `R2_BUCKET_NAME`, `R2_ENDPOINT`, and `R2_REGION` wiring),
+`get_cloudflare_r2_env`, `list_cloudflare_r2_objects`
+
+**Clerk:** `get_clerk_app_env` (returns `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+and optional sign-in/sign-up env wiring), `list_clerk_users`,
+`list_clerk_domains`, `list_clerk_redirect_urls`,
+`create_clerk_redirect_url`*
 
 **Namecheap:** `check_domain_availability` (availability + premium pricing),
 `list_namecheap_domains` (domains in the account),
@@ -472,7 +539,7 @@ src/
   sql.ts             SQL classification (defense-in-depth)
   service.ts         business logic (used by both MCP tools and CLI)
   provider-actions.ts  guarded provider operations
-  providers/         isolated REST adapters: github, vercel, railway, supabase, stripe, neon, namecheap
+  providers/         isolated REST adapters: github, vercel, railway, supabase, stripe, neon, upstash, upstash-qstash, cloudflare-r2, namecheap, sentry, posthog, clerk, resend, twilio
   tools/index.ts     MCP tool registration
   index.ts           stdio MCP server entry
   cli.ts             offlocal CLI

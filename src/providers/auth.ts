@@ -43,6 +43,20 @@ export function defaultEnvVar(provider: string): string {
       return "NAMECHEAP_API_KEY";
     case "neon":
       return "NEON_API_KEY";
+    case "upstash":
+      return "UPSTASH_API_KEY";
+    case "cloudflare_r2":
+      return "CLOUDFLARE_API_TOKEN";
+    case "sentry":
+      return "SENTRY_AUTH_TOKEN";
+    case "posthog":
+      return "POSTHOG_PERSONAL_API_KEY";
+    case "resend":
+      return "RESEND_API_KEY";
+    case "twilio":
+      return "TWILIO_AUTH_TOKEN";
+    case "clerk":
+      return "CLERK_SECRET_KEY";
     default:
       return `${provider.toUpperCase()}_TOKEN`;
   }

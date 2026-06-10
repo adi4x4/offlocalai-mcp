@@ -66,6 +66,19 @@ afterEach(() => {
   delete process.env.GITHUB_TOKEN;
   delete process.env.CUSTOM_VERCEL_TOKEN;
   delete process.env.CUSTOM_STRIPE_TEST_KEY;
+  delete process.env.TWILIO_AUTH_TOKEN;
+  delete process.env.RESEND_API_KEY;
+  delete process.env.SENTRY_AUTH_TOKEN;
+  delete process.env.POSTHOG_PERSONAL_API_KEY;
+  delete process.env.UPSTASH_EMAIL;
+  delete process.env.UPSTASH_API_KEY;
+  delete process.env.QSTASH_TOKEN;
+  delete process.env.QSTASH_CURRENT_SIGNING_KEY;
+  delete process.env.QSTASH_NEXT_SIGNING_KEY;
+  delete process.env.CLERK_SECRET_KEY;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  delete process.env.R2_ACCESS_KEY_ID;
+  delete process.env.R2_SECRET_ACCESS_KEY;
   delete process.env.DASHCLAW_BASE_URL;
   delete process.env.DASHCLAW_API_KEY;
 });
@@ -79,9 +92,1500 @@ function providerCalls() {
 }
 
 describe("provider auth defaults", () => {
-  it("returns NAMECHEAP_API_KEY and NEON_API_KEY for the new providers", () => {
+  it("returns explicit env vars for non-core providers", () => {
     expect(defaultEnvVar("namecheap")).toBe("NAMECHEAP_API_KEY");
     expect(defaultEnvVar("neon")).toBe("NEON_API_KEY");
+    expect(defaultEnvVar("twilio")).toBe("TWILIO_AUTH_TOKEN");
+    expect(defaultEnvVar("resend")).toBe("RESEND_API_KEY");
+    expect(defaultEnvVar("sentry")).toBe("SENTRY_AUTH_TOKEN");
+    expect(defaultEnvVar("posthog")).toBe("POSTHOG_PERSONAL_API_KEY");
+    expect(defaultEnvVar("upstash")).toBe("UPSTASH_API_KEY");
+    expect(defaultEnvVar("clerk")).toBe("CLERK_SECRET_KEY");
+    expect(defaultEnvVar("cloudflare_r2")).toBe("CLOUDFLARE_API_TOKEN");
+  });
+});
+
+describe("Sentry", () => {
+  function mapSentry(store: Store, projectSlug?: string) {
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "sentry" as any,
+      resource: {
+        provider: "sentry",
+        organizationSlug: "acme-org",
+        projectSlug,
+        teamSlug: "platform",
+      },
+    });
+  }
+
+  it("lists organization projects through the guarded read path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store);
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk([
+        {
+          id: "6758470122493650",
+          slug: "acme-api",
+          name: "Acme API",
+          platform: "node-express",
+          team: { slug: "platform" },
+        },
+      ]),
+    );
+
+    const res = await pa.sentryListProjects(store, { environment: "staging", limit: 1, query: "api" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({ id: "6758470122493650", slug: "acme-api", name: "Acme API" }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://sentry.io/api/0/organizations/acme-org/projects/?per_page=1&query=api",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sntrys_dummy" }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "sentry", tool: "list_sentry_projects" });
+  });
+
+  it("creates a team Sentry project as a governed env change", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store);
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://sentry.io/api/0/teams/acme-org/platform/projects/");
+        expect(JSON.parse(init.body)).toEqual({
+          name: "Acme API",
+          slug: "acme-api",
+          platform: "node-express",
+          default_rules: false,
+        });
+        return mockOk({ id: "6758470122493650", slug: "acme-api", name: "Acme API", platform: "node-express" });
+      }),
+    );
+
+    const res = await pa.sentryCreateProject(store, {
+      environment: "staging",
+      name: "Acme API",
+      slug: "acme-api",
+      platform: "node-express",
+      defaultRules: false,
+    });
+
+    expect(res.status).toBe("ok");
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"sentry"');
+    expect(guardBody).toContain('"capability":"env_change"');
+  });
+
+  it("lists client keys without exposing Sentry secret DSNs", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store, "acme-api");
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk([
+        {
+          id: "key_123",
+          name: "Browser",
+          public: "pub_123",
+          secret: "sec_123",
+          isActive: true,
+          dsn: {
+            public: "https://pub_123@o1.ingest.sentry.io/450",
+            secret: "https://pub_123:sec_123@o1.ingest.sentry.io/450",
+          },
+        },
+      ]),
+    );
+
+    const res = await pa.sentryListClientKeys(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({
+        id: "key_123",
+        name: "Browser",
+        publicKey: "pub_123",
+        publicDsn: "https://pub_123@o1.ingest.sentry.io/450",
+      }),
+    ]);
+    expect(JSON.stringify((res as any).data)).not.toContain("sec_123");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("sec_123");
+  });
+
+  it("creates a client key for SENTRY_DSN wiring without leaking secret DSNs", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store, "acme-api");
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://sentry.io/api/0/projects/acme-org/acme-api/keys/");
+        expect(JSON.parse(init.body)).toEqual({
+          name: "web",
+          useCase: "user",
+          rateLimit: { window: 7200, count: 1000 },
+        });
+        return mockOk({
+          id: "key_123",
+          name: "web",
+          public: "pub_123",
+          secret: "sec_123",
+          isActive: true,
+          dsn: {
+            public: "https://pub_123@o1.ingest.sentry.io/450",
+            secret: "https://pub_123:sec_123@o1.ingest.sentry.io/450",
+          },
+        });
+      }),
+    );
+
+    const res = await pa.sentryCreateClientKey(store, {
+      environment: "staging",
+      name: "web",
+      useCase: "user",
+      rateLimitWindow: 7200,
+      rateLimitCount: 1000,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toMatchObject({ id: "key_123", publicDsn: "https://pub_123@o1.ingest.sentry.io/450" });
+    expect(JSON.stringify((res as any).data)).not.toContain("sec_123");
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).not.toContain("sec_123");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("sec_123");
+  });
+
+  it("lists Sentry releases through the guarded read path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store, "acme-api");
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk([
+        {
+          id: 2,
+          version: "acme-api@abc123",
+          shortVersion: "abc123",
+          ref: "abc123",
+          deployCount: 1,
+          projects: [{ name: "Acme API", slug: "acme-api" }],
+        },
+      ]),
+    );
+
+    const res = await pa.sentryListReleases(store, { environment: "staging", query: "acme-api@" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({
+        id: "2",
+        version: "acme-api@abc123",
+        projectSlugs: ["acme-api"],
+        deployCount: 1,
+      }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://sentry.io/api/0/organizations/acme-org/releases/?query=acme-api%40",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sntrys_dummy" }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "sentry", tool: "list_sentry_releases" });
+  });
+
+  it("creates a Sentry release for the mapped project through a governed write path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store, "acme-api");
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://sentry.io/api/0/organizations/acme-org/releases/");
+        expect(JSON.parse(init.body)).toEqual({
+          version: "acme-api@abc123",
+          projects: ["acme-api"],
+          ref: "abc123",
+          url: "https://github.com/acme/api/commit/abc123",
+          dateReleased: "2026-06-10T16:00:00.000Z",
+        });
+        return mockOk({ id: 2, version: "acme-api@abc123", ref: "abc123", projects: [{ slug: "acme-api" }] });
+      }),
+    );
+
+    const res = await pa.sentryCreateRelease(store, {
+      environment: "staging",
+      version: "acme-api@abc123",
+      ref: "abc123",
+      url: "https://github.com/acme/api/commit/abc123",
+      dateReleased: "2026-06-10T16:00:00.000Z",
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toMatchObject({ version: "acme-api@abc123", projectSlugs: ["acme-api"] });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"sentry"');
+    expect(guardBody).toContain('"capability":"write"');
+  });
+
+  it("creates a Sentry deploy marker through the guarded deploy path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store, "acme-api");
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://sentry.io/api/0/organizations/acme-org/releases/acme-api%40abc123/deploys/");
+        expect(JSON.parse(init.body)).toEqual({
+          environment: "production",
+          name: "vercel dpl_123",
+          url: "https://acme.example.com",
+          dateStarted: "2026-06-10T15:55:00.000Z",
+          dateFinished: "2026-06-10T16:00:00.000Z",
+          projects: ["acme-api"],
+        });
+        return mockOk({
+          id: "dep_123",
+          environment: "production",
+          name: "vercel dpl_123",
+          url: "https://acme.example.com",
+          dateStarted: "2026-06-10T15:55:00.000Z",
+          dateFinished: "2026-06-10T16:00:00.000Z",
+        });
+      }),
+    );
+
+    const res = await pa.sentryCreateDeploy(store, {
+      environment: "staging",
+      version: "acme-api@abc123",
+      deployEnvironment: "production",
+      name: "vercel dpl_123",
+      url: "https://acme.example.com",
+      dateStarted: "2026-06-10T15:55:00.000Z",
+      dateFinished: "2026-06-10T16:00:00.000Z",
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toMatchObject({ id: "dep_123", environment: "production", name: "vercel dpl_123" });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"sentry"');
+    expect(guardBody).toContain('"capability":"deploy"');
+  });
+
+  it("lists deploy markers for a Sentry release", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapSentry(store, "acme-api");
+    process.env.SENTRY_AUTH_TOKEN = "sntrys_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk([
+        {
+          id: "dep_123",
+          environment: "production",
+          name: "vercel dpl_123",
+          url: "https://acme.example.com",
+          dateStarted: "2026-06-10T15:55:00.000Z",
+          dateFinished: "2026-06-10T16:00:00.000Z",
+        },
+      ]),
+    );
+
+    const res = await pa.sentryListDeploys(store, { environment: "staging", version: "acme-api@abc123" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({ id: "dep_123", environment: "production", url: "https://acme.example.com" }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://sentry.io/api/0/organizations/acme-org/releases/acme-api%40abc123/deploys/",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sntrys_dummy" }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "sentry", tool: "list_sentry_deploys" });
+  });
+});
+
+describe("PostHog", () => {
+  function mapPosthog(store: Store, projectId?: string) {
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "posthog" as any,
+      resource: {
+        provider: "posthog",
+        organizationId: "org_123",
+        projectId,
+        apiHost: "https://eu.posthog.com",
+        ingestHost: "https://eu.i.posthog.com",
+      },
+    });
+  }
+
+  it("lists organization projects without exposing PostHog secret tokens", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapPosthog(store);
+    process.env.POSTHOG_PERSONAL_API_KEY = "phx_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        count: 1,
+        results: [
+          {
+            id: 42,
+            uuid: "095be615-a8ad-4c33-8e9c-c7612fbf6c9f",
+            organization: "org_123",
+            api_token: "phc_public",
+            secret_api_token: "phs_secret",
+            secret_api_token_backup: "phs_backup",
+            name: "Acme Web",
+            timezone: "UTC",
+          },
+        ],
+      }),
+    );
+
+    const res = await pa.posthogListProjects(store, { environment: "staging", limit: 1, search: "Acme" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({ id: "42", name: "Acme Web", projectToken: "phc_public" }),
+    ]);
+    expect(JSON.stringify((res as any).data)).not.toContain("phs_secret");
+    expect(JSON.stringify((res as any).data)).not.toContain("phs_backup");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://eu.posthog.com/api/organizations/org_123/projects/?limit=1&search=Acme",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer phx_dummy" }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "posthog", tool: "list_posthog_projects" });
+  });
+
+  it("returns client-safe PostHog environment wiring for a mapped project", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapPosthog(store, "42");
+    process.env.POSTHOG_PERSONAL_API_KEY = "phx_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        id: 42,
+        organization: "org_123",
+        api_token: "phc_public",
+        secret_api_token: "phs_secret",
+        secret_api_token_backup: "phs_backup",
+        name: "Acme Web",
+      }),
+    );
+
+    const res = await pa.posthogGetProjectEnv(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      projectId: "42",
+      projectName: "Acme Web",
+      env: {
+        POSTHOG_PROJECT_ID: "42",
+        NEXT_PUBLIC_POSTHOG_KEY: "phc_public",
+        NEXT_PUBLIC_POSTHOG_HOST: "https://eu.i.posthog.com",
+      },
+    });
+    expect(JSON.stringify((res as any).data)).not.toContain("phs_secret");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("phs_secret");
+  });
+
+  it("creates a PostHog project as a governed env change and returns env wiring", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapPosthog(store);
+    process.env.POSTHOG_PERSONAL_API_KEY = "phx_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://eu.posthog.com/api/organizations/org_123/projects/");
+        expect(JSON.parse(init.body)).toEqual({
+          name: "Acme Web",
+          product_description: "CRM onboarding analytics",
+          app_urls: ["https://staging.acme.example"],
+          timezone: "UTC",
+          session_recording_opt_in: false,
+        });
+        return mockOk({
+          id: 42,
+          organization: "org_123",
+          api_token: "phc_public",
+          secret_api_token: "phs_secret",
+          secret_api_token_backup: "phs_backup",
+          name: "Acme Web",
+        });
+      }),
+    );
+
+    const res = await pa.posthogCreateProject(store, {
+      environment: "staging",
+      name: "Acme Web",
+      productDescription: "CRM onboarding analytics",
+      appUrls: ["https://staging.acme.example"],
+      timezone: "UTC",
+      sessionRecording: false,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data.env).toMatchObject({
+      NEXT_PUBLIC_POSTHOG_KEY: "phc_public",
+      NEXT_PUBLIC_POSTHOG_HOST: "https://eu.i.posthog.com",
+    });
+    expect(JSON.stringify((res as any).data)).not.toContain("phs_secret");
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"posthog"');
+    expect(guardBody).toContain('"capability":"env_change"');
+  });
+
+  it("lists PostHog feature flags through the guarded read path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapPosthog(store, "42");
+    process.env.POSTHOG_PERSONAL_API_KEY = "phx_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        count: 1,
+        results: [
+          {
+            id: 7,
+            key: "checkout-v2",
+            name: "Checkout v2",
+            active: true,
+            deleted: false,
+            created_at: "2026-06-10T16:00:00Z",
+            updated_at: "2026-06-10T16:05:00Z",
+            filters: { groups: [] },
+            tags: ["launch"],
+            status: "active",
+          },
+        ],
+      }),
+    );
+
+    const res = await pa.posthogListFeatureFlags(store, {
+      environment: "staging",
+      limit: 2,
+      search: "checkout",
+      active: "true",
+      type: "boolean",
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({ id: "7", key: "checkout-v2", active: true, tags: ["launch"] }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://eu.posthog.com/api/projects/42/feature_flags/?limit=2&search=checkout&active=true&type=boolean",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer phx_dummy" }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "posthog", tool: "list_posthog_feature_flags" });
+  });
+
+  it("creates a PostHog feature flag through a governed write path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapPosthog(store, "42");
+    process.env.POSTHOG_PERSONAL_API_KEY = "phx_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://eu.posthog.com/api/projects/42/feature_flags/");
+        expect(JSON.parse(init.body)).toEqual({
+          key: "checkout-v2",
+          name: "Checkout v2",
+          active: false,
+          filters: { groups: [] },
+          tags: ["launch"],
+          is_remote_configuration: false,
+        });
+        return mockOk({
+          id: 7,
+          key: "checkout-v2",
+          name: "Checkout v2",
+          active: false,
+          deleted: false,
+          filters: { groups: [] },
+          tags: ["launch"],
+        });
+      }),
+    );
+
+    const res = await pa.posthogCreateFeatureFlag(store, {
+      environment: "staging",
+      key: "checkout-v2",
+      name: "Checkout v2",
+      active: false,
+      filters: { groups: [] },
+      tags: ["launch"],
+      isRemoteConfiguration: false,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toMatchObject({ id: "7", key: "checkout-v2", active: false });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"posthog"');
+    expect(guardBody).toContain('"capability":"write"');
+  });
+});
+
+describe("Upstash Redis", () => {
+  function mapUpstash(store: Store, databaseId?: string) {
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "upstash" as any,
+      resource: {
+        provider: "upstash",
+        databaseId,
+        apiHost: "https://api.upstash.com",
+        qstashUrl: "https://qstash.upstash.io",
+        qstashTokenEnvVar: "QSTASH_TOKEN",
+        qstashCurrentSigningKeyEnvVar: "QSTASH_CURRENT_SIGNING_KEY",
+        qstashNextSigningKeyEnvVar: "QSTASH_NEXT_SIGNING_KEY",
+      },
+    });
+  }
+
+  it("lists Redis databases with Basic auth and strips credential fields", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    process.env.UPSTASH_EMAIL = "ops@example.com";
+    process.env.UPSTASH_API_KEY = "upstash_api_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk([
+        {
+          database_id: "db_123",
+          database_name: "acme-cache",
+          endpoint: "acme-cache-us1.upstash.io",
+          region: "global",
+          primary_region: "us-east-1",
+          read_regions: ["us-west-1"],
+          state: "active",
+          type: "free",
+          tls: true,
+          rest_token: "upstash_rest_secret",
+          read_only_rest_token: "upstash_readonly_secret",
+          password: "redis_password_secret",
+          customer_id: "ops@example.com",
+        },
+      ]),
+    );
+
+    const res = await pa.upstashListRedisDatabases(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({
+        id: "db_123",
+        name: "acme-cache",
+        endpoint: "acme-cache-us1.upstash.io",
+        state: "active",
+        primaryRegion: "us-east-1",
+        readRegions: ["us-west-1"],
+      }),
+    ]);
+    expect(JSON.stringify((res as any).data)).not.toContain("upstash_rest_secret");
+    expect(JSON.stringify((res as any).data)).not.toContain("redis_password_secret");
+    expect(JSON.stringify((res as any).data)).not.toContain("ops@example.com");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.upstash.com/v2/redis/databases",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Basic ${Buffer.from("ops@example.com:upstash_api_dummy").toString("base64")}`,
+        }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "upstash", tool: "list_upstash_redis_databases" });
+  });
+
+  it("creates a Redis database as a governed env change and returns app env wiring", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    process.env.UPSTASH_EMAIL = "ops@example.com";
+    process.env.UPSTASH_API_KEY = "upstash_api_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.upstash.com/v2/redis/database");
+        expect(JSON.parse(init.body)).toEqual({
+          database_name: "acme-cache",
+          platform: "aws",
+          primary_region: "us-east-1",
+          read_regions: ["us-west-1"],
+          plan: "free",
+          budget: 0,
+          eviction: true,
+          tls: true,
+        });
+        return mockOk({
+          database_id: "db_123",
+          database_name: "acme-cache",
+          endpoint: "acme-cache-us1.upstash.io",
+          region: "global",
+          primary_region: "us-east-1",
+          read_regions: ["us-west-1"],
+          state: "active",
+          type: "free",
+          tls: true,
+          rest_token: "upstash_rest_secret",
+          read_only_rest_token: "upstash_readonly_secret",
+        });
+      }),
+    );
+
+    const res = await pa.upstashCreateRedisDatabase(store, {
+      environment: "staging",
+      databaseName: "acme-cache",
+      platform: "aws",
+      primaryRegion: "us-east-1",
+      readRegions: ["us-west-1"],
+      plan: "free",
+      budget: 0,
+      eviction: true,
+      tls: true,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data.env).toEqual({
+      UPSTASH_REDIS_REST_URL: "https://acme-cache-us1.upstash.io",
+      UPSTASH_REDIS_REST_TOKEN: "upstash_rest_secret",
+      UPSTASH_REDIS_READ_ONLY_REST_TOKEN: "upstash_readonly_secret",
+    });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"upstash"');
+    expect(guardBody).toContain('"capability":"env_change"');
+    expect(guardBody).not.toContain("upstash_rest_secret");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("upstash_rest_secret");
+  });
+
+  it("returns Upstash Redis env wiring for a mapped database without leaking tokens to audit", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapUpstash(store, "db_123");
+    process.env.UPSTASH_EMAIL = "ops@example.com";
+    process.env.UPSTASH_API_KEY = "upstash_api_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        database_id: "db_123",
+        database_name: "acme-cache",
+        endpoint: "acme-cache-us1.upstash.io",
+        region: "global",
+        primary_region: "us-east-1",
+        read_regions: ["us-west-1"],
+        state: "active",
+        type: "free",
+        tls: true,
+        rest_token: "upstash_rest_secret",
+        read_only_rest_token: "upstash_readonly_secret",
+      }),
+    );
+
+    const res = await pa.upstashGetRedisEnv(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      databaseId: "db_123",
+      databaseName: "acme-cache",
+      env: {
+        UPSTASH_REDIS_REST_URL: "https://acme-cache-us1.upstash.io",
+        UPSTASH_REDIS_REST_TOKEN: "upstash_rest_secret",
+        UPSTASH_REDIS_READ_ONLY_REST_TOKEN: "upstash_readonly_secret",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.upstash.com/v2/redis/database/db_123",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Basic ${Buffer.from("ops@example.com:upstash_api_dummy").toString("base64")}`,
+        }),
+      }),
+    );
+    expect(JSON.stringify(lastAudit(store))).not.toContain("upstash_rest_secret");
+  });
+
+  it("returns QStash app env wiring with signing keys from the QStash API", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapUpstash(store, "db_123");
+    process.env.QSTASH_TOKEN = "qstash_token_secret";
+    fetchMock.mockResolvedValueOnce(mockOk({ current: "qstash_current_secret", next: "qstash_next_secret" }));
+
+    const res = await pa.upstashGetQstashEnv(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      url: "https://qstash.upstash.io",
+      credentialEnv: {
+        tokenEnvVar: "QSTASH_TOKEN",
+        currentSigningKeyEnvVar: "QSTASH_CURRENT_SIGNING_KEY",
+        nextSigningKeyEnvVar: "QSTASH_NEXT_SIGNING_KEY",
+      },
+      env: {
+        QSTASH_URL: "https://qstash.upstash.io",
+        QSTASH_TOKEN: "qstash_token_secret",
+        QSTASH_CURRENT_SIGNING_KEY: "qstash_current_secret",
+        QSTASH_NEXT_SIGNING_KEY: "qstash_next_secret",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://qstash.upstash.io/v2/keys",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer qstash_token_secret" }),
+      }),
+    );
+    expect(JSON.stringify(lastAudit(store))).not.toContain("qstash_token_secret");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("qstash_current_secret");
+  });
+
+  it("lists QStash schedules without returning bodies or forwarded headers", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapUpstash(store, "db_123");
+    process.env.QSTASH_TOKEN = "qstash_token_secret";
+    fetchMock.mockResolvedValueOnce(
+      mockOk([
+        {
+          scheduleId: "daily-sync",
+          cron: "CRON_TZ=America/New_York 0 9 * * *",
+          destination: "https://app.example.com/api/jobs/daily",
+          createdAt: 1781112000000,
+          method: "POST",
+          isPaused: false,
+          header: { Authorization: ["Bearer forwarded_secret"] },
+          body: "{\"apiKey\":\"payload_secret\"}",
+          retries: 3,
+          nextScheduleTime: 1781198400000,
+          lastScheduleTime: 1781112000000,
+        },
+      ]),
+    );
+
+    const res = await pa.upstashListQstashSchedules(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      {
+        scheduleId: "daily-sync",
+        cron: "CRON_TZ=America/New_York 0 9 * * *",
+        destination: "https://app.example.com/api/jobs/daily",
+        createdAt: 1781112000000,
+        method: "POST",
+        isPaused: false,
+        retries: 3,
+        nextScheduleTime: 1781198400000,
+        lastScheduleTime: 1781112000000,
+      },
+    ]);
+    expect(JSON.stringify((res as any).data)).not.toContain("payload_secret");
+    expect(JSON.stringify((res as any).data)).not.toContain("forwarded_secret");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://qstash.upstash.io/v2/schedules",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer qstash_token_secret" }),
+      }),
+    );
+  });
+
+  it("creates a QStash cron schedule as a governed env change and redacts payloads upstream", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapUpstash(store, "db_123");
+    process.env.QSTASH_TOKEN = "qstash_token_secret";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://qstash.upstash.io/v2/schedules/https%3A%2F%2Fapp.example.com%2Fapi%2Fjobs%2Fdaily");
+        expect(init.method).toBe("POST");
+        expect(init.headers).toMatchObject({
+          Authorization: "Bearer qstash_token_secret",
+          "Content-Type": "application/json",
+          "Upstash-Cron": "CRON_TZ=America/New_York 0 9 * * *",
+          "Upstash-Method": "POST",
+          "Upstash-Retries": "3",
+          "Upstash-Schedule-Id": "daily-sync",
+          "Upstash-Redact-Fields": "body, headers",
+        });
+        expect(init.body).toBe("{\"job\":\"daily_sync\"}");
+        return mockOk({ scheduleId: "daily-sync" });
+      }),
+    );
+
+    const res = await pa.upstashCreateQstashSchedule(store, {
+      environment: "staging",
+      destination: "https://app.example.com/api/jobs/daily",
+      cron: "CRON_TZ=America/New_York 0 9 * * *",
+      scheduleId: "daily-sync",
+      body: "{\"job\":\"daily_sync\"}",
+      contentType: "application/json",
+      method: "POST",
+      retries: 3,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({ scheduleId: "daily-sync" });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"upstash"');
+    expect(guardBody).toContain('"capability":"env_change"');
+    expect(guardBody).not.toContain("qstash_token_secret");
+    expect(guardBody).not.toContain("daily_sync");
+  });
+});
+
+describe("Cloudflare R2", () => {
+  function mapR2(store: Store, bucketName = "acme-assets") {
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "cloudflare_r2" as any,
+      resource: {
+        provider: "cloudflare_r2",
+        accountId: "acc_123",
+        bucketName,
+        apiHost: "https://api.cloudflare.com/client/v4",
+        jurisdiction: "default",
+        accessKeyIdEnvVar: "R2_ACCESS_KEY_ID",
+        secretAccessKeyEnvVar: "R2_SECRET_ACCESS_KEY",
+        publicUrl: "https://assets.acme.example",
+      },
+    });
+  }
+
+  it("lists R2 buckets through the Cloudflare API without exposing tokens", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapR2(store);
+    process.env.CLOUDFLARE_API_TOKEN = "cf_api_secret";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        success: true,
+        errors: [],
+        messages: [],
+        result: {
+          buckets: [
+            {
+              name: "acme-assets",
+              creation_date: "2026-06-10T00:00:00.000Z",
+              jurisdiction: "default",
+              location: "enam",
+              storage_class: "Standard",
+            },
+          ],
+        },
+        result_info: { cursor: "next", per_page: 20 },
+      }),
+    );
+
+    const res = await pa.cloudflareR2ListBuckets(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      buckets: [
+        {
+          name: "acme-assets",
+          createdAt: "2026-06-10T00:00:00.000Z",
+          jurisdiction: "default",
+          location: "enam",
+          storageClass: "Standard",
+        },
+      ],
+      cursor: "next",
+      perPage: 20,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.cloudflare.com/client/v4/accounts/acc_123/r2/buckets",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer cf_api_secret" }),
+      }),
+    );
+    expect(JSON.stringify(lastAudit(store))).not.toContain("cf_api_secret");
+  });
+
+  it("creates an R2 bucket as a governed env change and returns app wiring", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapR2(store);
+    process.env.CLOUDFLARE_API_TOKEN = "cf_api_secret";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.cloudflare.com/client/v4/accounts/acc_123/r2/buckets");
+        expect(init.method).toBe("POST");
+        expect(init.headers).toMatchObject({
+          Authorization: "Bearer cf_api_secret",
+          "Content-Type": "application/json",
+          "cf-r2-jurisdiction": "default",
+        });
+        expect(JSON.parse(init.body)).toEqual({
+          name: "acme-assets",
+          locationHint: "enam",
+          storageClass: "Standard",
+        });
+        return mockOk({
+          success: true,
+          errors: [],
+          messages: [],
+          result: {
+            name: "acme-assets",
+            creation_date: "2026-06-10T00:00:00.000Z",
+            jurisdiction: "default",
+            location: "enam",
+            storage_class: "Standard",
+          },
+        });
+      }),
+    );
+
+    const res = await pa.cloudflareR2CreateBucket(store, {
+      environment: "staging",
+      bucketName: "acme-assets",
+      locationHint: "enam",
+      storageClass: "Standard",
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toMatchObject({
+      bucket: { name: "acme-assets", location: "enam", storageClass: "Standard" },
+      env: {
+        R2_ACCOUNT_ID: "acc_123",
+        R2_BUCKET_NAME: "acme-assets",
+        R2_ENDPOINT: "https://acc_123.r2.cloudflarestorage.com",
+        R2_REGION: "auto",
+        R2_PUBLIC_URL: "https://assets.acme.example",
+      },
+      credentialEnv: {
+        accessKeyIdEnvVar: "R2_ACCESS_KEY_ID",
+        secretAccessKeyEnvVar: "R2_SECRET_ACCESS_KEY",
+      },
+    });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"cloudflare_r2"');
+    expect(guardBody).toContain('"capability":"env_change"');
+    expect(guardBody).not.toContain("cf_api_secret");
+  });
+
+  it("returns R2 app env wiring with S3 credentials read from env and kept out of audit", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapR2(store);
+    process.env.R2_ACCESS_KEY_ID = "r2_access_id";
+    process.env.R2_SECRET_ACCESS_KEY = "r2_secret_key";
+
+    const res = await pa.cloudflareR2GetEnv(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      bucketName: "acme-assets",
+      endpoint: "https://acc_123.r2.cloudflarestorage.com",
+      credentialEnv: {
+        accessKeyIdEnvVar: "R2_ACCESS_KEY_ID",
+        secretAccessKeyEnvVar: "R2_SECRET_ACCESS_KEY",
+      },
+      env: {
+        R2_ACCOUNT_ID: "acc_123",
+        R2_BUCKET_NAME: "acme-assets",
+        R2_ENDPOINT: "https://acc_123.r2.cloudflarestorage.com",
+        R2_REGION: "auto",
+        R2_PUBLIC_URL: "https://assets.acme.example",
+        R2_ACCESS_KEY_ID: "r2_access_id",
+        R2_SECRET_ACCESS_KEY: "r2_secret_key",
+      },
+    });
+    expect(providerCalls()).toHaveLength(0);
+    expect(JSON.stringify(lastAudit(store))).not.toContain("r2_secret_key");
+  });
+
+  it("lists R2 objects for the mapped bucket", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapR2(store);
+    process.env.CLOUDFLARE_API_TOKEN = "cf_api_secret";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        success: true,
+        errors: [],
+        messages: [],
+        result: {
+          objects: [
+            {
+              key: "avatars/user_123.png",
+              size: 42,
+              etag: "abc123",
+              uploaded: "2026-06-10T00:00:00.000Z",
+              storage_class: "Standard",
+            },
+          ],
+        },
+        result_info: { cursor: "next", per_page: 50 },
+      }),
+    );
+
+    const res = await pa.cloudflareR2ListObjects(store, {
+      environment: "staging",
+      prefix: "avatars/",
+      limit: 50,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      objects: [
+        {
+          key: "avatars/user_123.png",
+          size: 42,
+          etag: "abc123",
+          uploadedAt: "2026-06-10T00:00:00.000Z",
+          storageClass: "Standard",
+        },
+      ],
+      cursor: "next",
+      perPage: 50,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.cloudflare.com/client/v4/accounts/acc_123/r2/buckets/acme-assets/objects?prefix=avatars%2F&per_page=50",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer cf_api_secret" }),
+      }),
+    );
+  });
+});
+
+describe("Clerk", () => {
+  function mapClerk(store: Store) {
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "clerk" as any,
+      resource: {
+        provider: "clerk",
+        publishableKey: "pk_test_public",
+        signInUrl: "/sign-in",
+        signUpUrl: "/sign-up",
+        signInFallbackRedirectUrl: "/dashboard",
+        signUpFallbackRedirectUrl: "/dashboard",
+      },
+    });
+  }
+
+  it("returns client-safe Clerk environment wiring without exposing the secret key", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapClerk(store);
+    process.env.CLERK_SECRET_KEY = "sk_test_secret";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        data: [
+          {
+            object: "domain",
+            id: "dmn_123",
+            name: "accounts.acme.example",
+            is_satellite: false,
+            frontend_api_url: "https://humble-lion-12.clerk.accounts.dev",
+            development_origin: "https://humble-lion-12.clerk.accounts.dev",
+            accounts_portal_url: "https://accounts.acme.example",
+            proxy_url: null,
+          },
+        ],
+        total_count: 1,
+      }),
+    );
+
+    const res = await pa.clerkGetAppEnv(store, { environment: "staging" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      domain: "accounts.acme.example",
+      frontendApiUrl: "https://humble-lion-12.clerk.accounts.dev",
+      secretEnvVar: "CLERK_SECRET_KEY",
+      env: {
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_public",
+        NEXT_PUBLIC_CLERK_SIGN_IN_URL: "/sign-in",
+        NEXT_PUBLIC_CLERK_SIGN_UP_URL: "/sign-up",
+        NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL: "/dashboard",
+        NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL: "/dashboard",
+        NEXT_PUBLIC_CLERK_FAPI: "https://humble-lion-12.clerk.accounts.dev",
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.clerk.com/v1/domains",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk_test_secret" }),
+      }),
+    );
+    expect(JSON.stringify((res as any).data)).not.toContain("sk_test_secret");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("sk_test_secret");
+  });
+
+  it("lists Clerk users with safe summaries and keeps user PII out of audit", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapClerk(store);
+    process.env.CLERK_SECRET_KEY = "sk_test_secret";
+    fetchMock.mockResolvedValueOnce(
+      mockOk([
+        {
+          id: "user_123",
+          first_name: "Ada",
+          last_name: "Lovelace",
+          primary_email_address_id: "idn_123",
+          email_addresses: [{ id: "idn_123", email_address: "ada@example.com" }],
+          private_metadata: { internalNote: "do-not-return" },
+          unsafe_metadata: { leakedByClient: "do-not-return" },
+          created_at: 1770489600000,
+          updated_at: 1770489700000,
+          last_sign_in_at: 1770489800000,
+          banned: false,
+          locked: false,
+        },
+      ]),
+    );
+
+    const res = await pa.clerkListUsers(store, { environment: "staging", limit: 1, query: "ada@example.com" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      {
+        id: "user_123",
+        primaryEmail: "ada@example.com",
+        firstName: "Ada",
+        lastName: "Lovelace",
+        createdAt: 1770489600000,
+        updatedAt: 1770489700000,
+        lastSignInAt: 1770489800000,
+        banned: false,
+        locked: false,
+      },
+    ]);
+    expect(JSON.stringify((res as any).data)).not.toContain("do-not-return");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.clerk.com/v1/users?limit=1&query=ada%40example.com",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk_test_secret" }),
+      }),
+    );
+    expect(JSON.stringify(lastAudit(store))).not.toContain("ada@example.com");
+  });
+
+  it("lists and creates Clerk redirect URLs through guarded provider actions", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapClerk(store);
+    process.env.CLERK_SECRET_KEY = "sk_test_secret";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        data: [{ id: "rurl_123", url: "my-app://oauth-callback", created_at: 1770489600000 }],
+        total_count: 1,
+      }),
+    );
+
+    const listed = await pa.clerkListRedirectUrls(store, { environment: "staging", limit: 10 });
+
+    expect(listed.status).toBe("ok");
+    expect((listed as any).data).toEqual([
+      { id: "rurl_123", url: "my-app://oauth-callback", createdAt: 1770489600000 },
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.clerk.com/v1/redirect_urls?limit=10",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk_test_secret" }),
+      }),
+    );
+
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.clerk.com/v1/redirect_urls");
+        expect(JSON.parse(init.body)).toEqual({ url: "my-app://oauth-callback" });
+        return mockOk({ id: "rurl_456", url: "my-app://oauth-callback", created_at: 1770489700000 });
+      }),
+    );
+
+    const created = await pa.clerkCreateRedirectUrl(store, {
+      environment: "staging",
+      url: "my-app://oauth-callback",
+    });
+
+    expect(created.status).toBe("ok");
+    expect((created as any).data).toEqual({
+      id: "rurl_456",
+      url: "my-app://oauth-callback",
+      createdAt: 1770489700000,
+    });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"clerk"');
+    expect(guardBody).toContain('"capability":"env_change"');
+    expect(guardBody).not.toContain("sk_test_secret");
+  });
+});
+
+describe("Resend", () => {
+  function mapResend(store: Store) {
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "resend" as any,
+      resource: {
+        provider: "resend",
+        domain: "example.com",
+        defaultFrom: "Acme <onboarding@example.com>",
+      },
+    });
+  }
+
+  it("lists email domains through the guarded read path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapResend(store);
+    process.env.RESEND_API_KEY = "re_dummy";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        object: "list",
+        has_more: false,
+        data: [
+          {
+            id: "dom_123",
+            name: "example.com",
+            status: "verified",
+            created_at: "2026-06-10T00:00:00.000Z",
+            region: "us-east-1",
+            capabilities: { sending: "enabled", receiving: "disabled" },
+          },
+        ],
+      }),
+    );
+
+    const res = await pa.resendListDomains(store, { environment: "staging", limit: 1 });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({ id: "dom_123", name: "example.com", status: "verified" }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.resend.com/domains?limit=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer re_dummy",
+          "User-Agent": expect.stringContaining("offlocal"),
+        }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "resend", tool: "list_resend_domains" });
+  });
+
+  it("creates a Resend domain and returns DNS records through a governed env change", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapResend(store);
+    process.env.RESEND_API_KEY = "re_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.resend.com/domains");
+        expect(JSON.parse(init.body)).toEqual({ name: "example.com" });
+        return mockOk({
+          id: "dom_123",
+          name: "example.com",
+          status: "not_started",
+          records: [{ record: "DKIM", name: "k._domainkey", type: "CNAME", value: "k.dkim.amazonses.com.", status: "not_started" }],
+        });
+      }),
+    );
+
+    const res = await pa.resendCreateDomain(store, { environment: "staging", name: "example.com" });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data.records).toEqual([expect.objectContaining({ type: "CNAME", name: "k._domainkey" })]);
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"resend"');
+    expect(guardBody).toContain('"capability":"env_change"');
+  });
+
+  it("triggers domain verification as a governed env change", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapResend(store);
+    process.env.RESEND_API_KEY = "re_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.resend.com/domains/dom_123/verify");
+        expect(init.method).toBe("POST");
+        return mockOk({ object: "domain", id: "dom_123" });
+      }),
+    );
+
+    const res = await pa.resendVerifyDomain(store, { environment: "staging", domainId: "dom_123" });
+
+    expect(res.status).toBe("ok");
+    expect(lastAudit(store)).toMatchObject({ provider: "resend", tool: "verify_resend_domain", result: "success" });
+  });
+
+  it("sends email without leaking recipients, subject, or body into DashClaw/audit", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapResend(store);
+    process.env.RESEND_API_KEY = "re_dummy";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.resend.com/emails");
+        expect(JSON.parse(init.body)).toMatchObject({
+          from: "Acme <onboarding@example.com>",
+          to: ["ada@example.com"],
+          subject: "Your OTP is 123456",
+          html: "<p>Your OTP is 123456</p>",
+        });
+        return mockOk({ id: "email_123" });
+      }),
+    );
+
+    const res = await pa.resendSendEmail(store, {
+      environment: "staging",
+      to: ["ada@example.com"],
+      subject: "Your OTP is 123456",
+      html: "<p>Your OTP is 123456</p>",
+    });
+
+    expect(res.status).toBe("ok");
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"resend"');
+    expect(guardBody).not.toContain("ada@example.com");
+    expect(guardBody).not.toContain("123456");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("ada@example.com");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("123456");
+  });
+});
+
+describe("Twilio", () => {
+  function mapTwilio(store: Store) {
+    mapProviderResource(store, {
+      environment: "staging",
+      provider: "twilio" as any,
+      resource: {
+        provider: "twilio",
+        accountSid: "AC11111111111111111111111111111111",
+        fromNumber: "+15551230000",
+      },
+    });
+  }
+
+  it("lists phone numbers through the guarded read path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapTwilio(store);
+    process.env.TWILIO_AUTH_TOKEN = "tw_auth";
+    fetchMock.mockResolvedValueOnce(
+      mockOk({
+        incoming_phone_numbers: [
+          {
+            sid: "PN111",
+            phone_number: "+15551230000",
+            friendly_name: "Support",
+            sms_url: "https://example.com/api/twilio/sms",
+            voice_url: "https://example.com/api/twilio/voice",
+            capabilities: { SMS: true, voice: true },
+          },
+        ],
+      }),
+    );
+
+    const res = await pa.twilioListPhoneNumbers(store, { environment: "staging", limit: 1 });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual([
+      expect.objectContaining({
+        sid: "PN111",
+        phoneNumber: "+15551230000",
+        smsUrl: "https://example.com/api/twilio/sms",
+        voiceUrl: "https://example.com/api/twilio/voice",
+      }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.twilio.com/2010-04-01/Accounts/AC11111111111111111111111111111111/IncomingPhoneNumbers.json?PageSize=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Basic ${Buffer.from("AC11111111111111111111111111111111:tw_auth").toString("base64")}`,
+        }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "twilio", tool: "list_twilio_phone_numbers" });
+  });
+
+  it("updates SMS and voice webhooks as a governed env change", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapTwilio(store);
+    process.env.TWILIO_AUTH_TOKEN = "tw_auth";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe(
+          "https://api.twilio.com/2010-04-01/Accounts/AC11111111111111111111111111111111/IncomingPhoneNumbers/PN111.json",
+        );
+        expect(init.body).toContain("SmsUrl=https%3A%2F%2Fexample.com%2Fapi%2Ftwilio%2Fsms");
+        expect(init.body).toContain("VoiceUrl=https%3A%2F%2Fexample.com%2Fapi%2Ftwilio%2Fvoice");
+        return mockOk({ sid: "PN111", sms_url: "https://example.com/api/twilio/sms", voice_url: "https://example.com/api/twilio/voice" });
+      }),
+    );
+
+    const res = await pa.twilioUpdatePhoneNumberWebhooks(store, {
+      environment: "staging",
+      phoneNumberSid: "PN111",
+      smsUrl: "https://example.com/api/twilio/sms",
+      voiceUrl: "https://example.com/api/twilio/voice",
+    });
+
+    expect(res.status).toBe("ok");
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"twilio"');
+    expect(guardBody).toContain('"capability":"env_change"');
+  });
+
+  it("sends SMS without leaking message content or recipient into DashClaw/audit", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapTwilio(store);
+    process.env.TWILIO_AUTH_TOKEN = "tw_auth";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.twilio.com/2010-04-01/Accounts/AC11111111111111111111111111111111/Messages.json");
+        expect(init.body).toContain("Body=Your%20OTP%20is%20123456");
+        expect(init.body).toContain("To=%2B15559876543");
+        return mockOk({ sid: "SM111", status: "queued", to: "+15559876543", from: "+15551230000" });
+      }),
+    );
+
+    const res = await pa.twilioSendSms(store, {
+      environment: "staging",
+      to: "+15559876543",
+      body: "Your OTP is 123456",
+    });
+
+    expect(res.status).toBe("ok");
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"twilio"');
+    expect(guardBody).not.toContain("+15559876543");
+    expect(guardBody).not.toContain("123456");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("+15559876543");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("123456");
+  });
+
+  it("creates an outbound voice call through the live guarded path", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapTwilio(store);
+    process.env.TWILIO_AUTH_TOKEN = "tw_auth";
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.twilio.com/2010-04-01/Accounts/AC11111111111111111111111111111111/Calls.json");
+        expect(init.body).toContain("Url=https%3A%2F%2Fexample.com%2Fapi%2Ftwilio%2Fvoice");
+        return mockOk({ sid: "CA111", status: "queued", to: "+15559876543", from: "+15551230000" });
+      }),
+    );
+
+    const res = await pa.twilioCreateCall(store, {
+      environment: "staging",
+      to: "+15559876543",
+      url: "https://example.com/api/twilio/voice",
+    });
+
+    expect(res.status).toBe("ok");
+    expect(lastAudit(store)).toMatchObject({ provider: "twilio", tool: "create_twilio_call", result: "success" });
   });
 });
 
@@ -245,6 +1749,181 @@ describe("mapped provider connections", () => {
     expect(res.status).toBe("ok");
     expect((res as any).data[0]).toMatchObject({ number: 7, headRef: "feature", baseRef: "main" });
     expect(lastAudit(store)).toMatchObject({ result: "success", provider: "github", tool: "list_github_pull_requests" });
+  });
+
+  it("lists GitHub Actions workflow runs for the mapped repo", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockResolvedValueOnce(mockOk({
+      total_count: 1,
+      workflow_runs: [
+        {
+          id: 101,
+          name: "CI",
+          display_title: "Ship feature",
+          status: "completed",
+          conclusion: "failure",
+          event: "pull_request",
+          head_branch: "feature",
+          head_sha: "abc123",
+          run_attempt: 1,
+          created_at: "2026-06-10T00:00:00Z",
+          updated_at: "2026-06-10T00:03:00Z",
+          html_url: "https://github.com/acme/acme-crm/actions/runs/101",
+          workflow_id: 7,
+        },
+      ],
+    }));
+
+    const res = await pa.githubWorkflowRuns(store, {
+      environment: "staging",
+      branch: "feature",
+      status: "completed",
+      limit: 1,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      totalCount: 1,
+      workflowRuns: [
+        {
+          id: 101,
+          name: "CI",
+          title: "Ship feature",
+          status: "completed",
+          conclusion: "failure",
+          event: "pull_request",
+          headBranch: "feature",
+          headSha: "abc123",
+          runAttempt: 1,
+          createdAt: "2026-06-10T00:00:00Z",
+          updatedAt: "2026-06-10T00:03:00Z",
+          htmlUrl: "https://github.com/acme/acme-crm/actions/runs/101",
+          workflowId: 7,
+        },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/acme-crm/actions/runs?branch=feature&status=completed&per_page=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer gh_dummy" }),
+      }),
+    );
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "github", tool: "list_github_workflow_runs" });
+  });
+
+  it("lists GitHub Actions jobs for a workflow run without log bodies", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockResolvedValueOnce(mockOk({
+      total_count: 1,
+      jobs: [
+        {
+          id: 501,
+          run_id: 101,
+          name: "test",
+          status: "completed",
+          conclusion: "failure",
+          started_at: "2026-06-10T00:01:00Z",
+          completed_at: "2026-06-10T00:02:00Z",
+          html_url: "https://github.com/acme/acme-crm/actions/runs/101/job/501",
+          steps: [
+            {
+              name: "npm test",
+              status: "completed",
+              conclusion: "failure",
+              number: 3,
+              started_at: "2026-06-10T00:01:30Z",
+              completed_at: "2026-06-10T00:02:00Z",
+            },
+          ],
+        },
+      ],
+    }));
+
+    const res = await pa.githubWorkflowJobs(store, {
+      environment: "staging",
+      runId: 101,
+      filter: "latest",
+      limit: 1,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      totalCount: 1,
+      jobs: [
+        {
+          id: 501,
+          runId: 101,
+          name: "test",
+          status: "completed",
+          conclusion: "failure",
+          startedAt: "2026-06-10T00:01:00Z",
+          completedAt: "2026-06-10T00:02:00Z",
+          htmlUrl: "https://github.com/acme/acme-crm/actions/runs/101/job/501",
+          steps: [
+            {
+              name: "npm test",
+              status: "completed",
+              conclusion: "failure",
+              number: 3,
+              startedAt: "2026-06-10T00:01:30Z",
+              completedAt: "2026-06-10T00:02:00Z",
+            },
+          ],
+        },
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/acme-crm/actions/runs/101/jobs?filter=latest&per_page=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer gh_dummy" }),
+      }),
+    );
+    expect(JSON.stringify((res as any).data)).not.toContain("logs");
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "github", tool: "list_github_workflow_jobs" });
+  });
+
+  it("reruns a GitHub Actions workflow run as a governed write", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.github.com/repos/acme/acme-crm/actions/runs/101/rerun");
+        expect(init.method).toBe("POST");
+        return new Response(null, { status: 201 });
+      }),
+    );
+
+    const res = await pa.githubRerunWorkflowRun(store, { environment: "staging", runId: 101 });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({ runId: 101, rerun: true });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"github"');
+    expect(guardBody).toContain('"capability":"write"');
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "github", tool: "rerun_github_workflow_run" });
+  });
+
+  it("cancels a GitHub Actions workflow run as a governed write", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.github.com/repos/acme/acme-crm/actions/runs/101/cancel");
+        expect(init.method).toBe("POST");
+        return new Response(null, { status: 202 });
+      }),
+    );
+
+    const res = await pa.githubCancelWorkflowRun(store, { environment: "staging", runId: 101 });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({ runId: 101, canceled: true });
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"provider":"github"');
+    expect(guardBody).toContain('"capability":"write"');
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "github", tool: "cancel_github_workflow_run" });
   });
 });
 
@@ -866,6 +2545,67 @@ describe("Vercel", () => {
     expect(providerCalls()).toHaveLength(0);
   });
 
+  it("sets multiple Vercel env vars through one governed action without leaking values", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    const bodies: any[] = [];
+    fetchMock.mockImplementation(
+      withDashclawRoute((url: string, init?: any) => {
+        expect(url).toBe("https://api.vercel.com/v10/projects/acme-crm-preview/env?upsert=true");
+        const body = JSON.parse(init.body);
+        bodies.push(body);
+        return mockOk({ id: `env_${body.key}`, key: body.key });
+      }),
+    );
+
+    const res = await pa.setAppEnvVars(store, {
+      environment: "staging",
+      targetProvider: "vercel",
+      vars: [
+        { key: "DATABASE_URL", value: "postgres://secret" },
+        { key: "STRIPE_WEBHOOK_SECRET", value: "whsec_secret" },
+      ],
+      target: ["preview"],
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      targetProvider: "vercel",
+      count: 2,
+      keys: ["DATABASE_URL", "STRIPE_WEBHOOK_SECRET"],
+    });
+    expect(providerCalls()).toHaveLength(2);
+    expect(bodies).toEqual([
+      { key: "DATABASE_URL", value: "postgres://secret", type: "encrypted", target: ["preview"] },
+      { key: "STRIPE_WEBHOOK_SECRET", value: "whsec_secret", type: "encrypted", target: ["preview"] },
+    ]);
+    const guardBody = String(fetchMock.mock.calls.find(([url]) => url === "https://dashclaw.example/api/guard")?.[1]?.body);
+    expect(guardBody).toContain('"tool":"set_app_env_vars"');
+    expect(guardBody).toContain('"capability":"env_change"');
+    expect(guardBody).not.toContain("postgres://secret");
+    expect(guardBody).not.toContain("whsec_secret");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("postgres://secret");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("whsec_secret");
+  });
+
+  it("rejects duplicate bulk env-var keys before calling the target provider", async () => {
+    const store = freshStore();
+    seedAcme(store);
+
+    const res = await pa.setAppEnvVars(store, {
+      environment: "staging",
+      targetProvider: "vercel",
+      vars: [
+        { key: "DATABASE_URL", value: "one" },
+        { key: "DATABASE_URL", value: "two" },
+      ],
+    });
+
+    expect(res.status).toBe("error");
+    expect((res as any).error).toMatch(/duplicate/i);
+    expect(providerCalls()).toHaveLength(0);
+  });
+
   it("allows and executes a non-production (preview) deploy", async () => {
     const store = freshStore();
     seedAcme(store);
@@ -1180,6 +2920,48 @@ describe("Railway writes", () => {
     expect(providerCalls()).toHaveLength(1);
     const body = JSON.parse((providerCalls()[0]![1] as RequestInit).body as string);
     expect(body.variables.input).toMatchObject({ name: "FEATURE_FLAG", value: "on", environmentId: "rw_env_1" });
+  });
+
+  it("sets multiple Railway env vars through one governed action", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRailwayTo(store, "staging");
+    fetchMock.mockImplementation(withDashclawRoute((url: string, init: any) => routeMutations()(url, init)));
+
+    const res = await pa.setAppEnvVars(store, {
+      environment: "staging",
+      targetProvider: "railway",
+      vars: [
+        { key: "DATABASE_URL", value: "postgres://secret" },
+        { key: "RESEND_API_KEY", value: "re_secret" },
+      ],
+      skipDeploys: true,
+    });
+
+    expect(res.status).toBe("ok");
+    expect((res as any).data).toEqual({
+      targetProvider: "railway",
+      count: 2,
+      keys: ["DATABASE_URL", "RESEND_API_KEY"],
+    });
+    expect(providerCalls()).toHaveLength(2);
+    const first = JSON.parse((providerCalls()[0]![1] as RequestInit).body as string);
+    const second = JSON.parse((providerCalls()[1]![1] as RequestInit).body as string);
+    expect(first.variables.input).toMatchObject({
+      projectId: "rw_proj_1",
+      environmentId: "rw_env_1",
+      serviceId: "rw_svc_1",
+      name: "DATABASE_URL",
+      value: "postgres://secret",
+      skipDeploys: true,
+    });
+    expect(second.variables.input).toMatchObject({
+      name: "RESEND_API_KEY",
+      value: "re_secret",
+      skipDeploys: true,
+    });
+    expect(JSON.stringify(lastAudit(store))).not.toContain("postgres://secret");
+    expect(JSON.stringify(lastAudit(store))).not.toContain("re_secret");
   });
 
   it("rejects empty variable keys before calling Railway", async () => {

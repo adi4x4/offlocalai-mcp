@@ -118,6 +118,276 @@ describe("config seeding", () => {
     ).toMatchObject({ connectionId });
   });
 
+  it("seeds Twilio communication mapping from config", () => {
+    const store = freshStore();
+    const path = writeTempConfig(`
+projects:
+  acme-comms:
+    environments:
+      staging:
+        kind: staging
+        twilio:
+          account_sid: AC11111111111111111111111111111111
+          from_number: "+15551230000"
+          messaging_service_sid: MG11111111111111111111111111111111
+policy:
+  require_approval:
+    - twilio.write
+`);
+    const config = loadConfig(path)!;
+
+    applyConfig(store, config);
+
+    expect(listProviderMappings(store, "acme-comms")).toEqual([
+      expect.objectContaining({
+        provider: "twilio",
+        resource: expect.objectContaining({
+          provider: "twilio",
+          accountSid: "AC11111111111111111111111111111111",
+          fromNumber: "+15551230000",
+          messagingServiceSid: "MG11111111111111111111111111111111",
+        }),
+      }),
+    ]);
+    expect(
+      checkPolicy(store, { project: "acme-comms", environment: "staging", provider: "twilio" as any, capability: "write" }).effect,
+    ).toBe("allow");
+  });
+
+  it("seeds Resend email mapping from config", () => {
+    const store = freshStore();
+    const path = writeTempConfig(`
+projects:
+  acme-email:
+    environments:
+      staging:
+        kind: staging
+        resend:
+          domain: example.com
+          default_from: Acme <onboarding@example.com>
+policy:
+  require_approval:
+    - resend.write
+`);
+    const config = loadConfig(path)!;
+
+    applyConfig(store, config);
+
+    expect(listProviderMappings(store, "acme-email")).toEqual([
+      expect.objectContaining({
+        provider: "resend",
+        resource: expect.objectContaining({
+          provider: "resend",
+          domain: "example.com",
+          defaultFrom: "Acme <onboarding@example.com>",
+        }),
+      }),
+    ]);
+    expect(
+      checkPolicy(store, { project: "acme-email", environment: "staging", provider: "resend" as any, capability: "write" }).effect,
+    ).toBe("allow");
+  });
+
+  it("seeds Sentry observability mapping from config", () => {
+    const store = freshStore();
+    const path = writeTempConfig(`
+projects:
+  acme-observability:
+    environments:
+      staging:
+        kind: staging
+        sentry:
+          organization_slug: acme-org
+          project_slug: acme-api
+          team_slug: platform
+policy:
+  require_approval:
+    - sentry.write
+`);
+    const config = loadConfig(path)!;
+
+    applyConfig(store, config);
+
+    expect(listProviderMappings(store, "acme-observability")).toEqual([
+      expect.objectContaining({
+        provider: "sentry",
+        resource: expect.objectContaining({
+          provider: "sentry",
+          organizationSlug: "acme-org",
+          projectSlug: "acme-api",
+          teamSlug: "platform",
+        }),
+      }),
+    ]);
+    expect(
+      checkPolicy(store, { project: "acme-observability", environment: "staging", provider: "sentry" as any, capability: "write" }).effect,
+    ).toBe("allow");
+  });
+
+  it("seeds PostHog analytics mapping from config", () => {
+    const store = freshStore();
+    const path = writeTempConfig(`
+projects:
+  acme-analytics:
+    environments:
+      staging:
+        kind: staging
+        posthog:
+          organization_id: org_123
+          project_id: "42"
+          api_host: https://eu.posthog.com
+          ingest_host: https://eu.i.posthog.com
+policy:
+  require_approval:
+    - posthog.write
+`);
+    const config = loadConfig(path)!;
+
+    applyConfig(store, config);
+
+    expect(listProviderMappings(store, "acme-analytics")).toEqual([
+      expect.objectContaining({
+        provider: "posthog",
+        resource: expect.objectContaining({
+          provider: "posthog",
+          organizationId: "org_123",
+          projectId: "42",
+          apiHost: "https://eu.posthog.com",
+          ingestHost: "https://eu.i.posthog.com",
+        }),
+      }),
+    ]);
+    expect(
+      checkPolicy(store, { project: "acme-analytics", environment: "staging", provider: "posthog" as any, capability: "write" }).effect,
+    ).toBe("allow");
+  });
+
+  it("seeds Upstash Redis mapping from config", () => {
+    const store = freshStore();
+    const path = writeTempConfig(`
+projects:
+  acme-cache:
+    environments:
+      staging:
+        kind: staging
+        upstash:
+          database_id: db_123
+          api_host: https://api.upstash.com
+          qstash_url: https://qstash.upstash.io
+          qstash_token_env_var: QSTASH_TOKEN
+          qstash_current_signing_key_env_var: QSTASH_CURRENT_SIGNING_KEY
+          qstash_next_signing_key_env_var: QSTASH_NEXT_SIGNING_KEY
+policy:
+  require_approval:
+    - upstash.env_change
+`);
+    const config = loadConfig(path)!;
+
+    applyConfig(store, config);
+
+    expect(listProviderMappings(store, "acme-cache")).toEqual([
+      expect.objectContaining({
+        provider: "upstash",
+        resource: expect.objectContaining({
+          provider: "upstash",
+          databaseId: "db_123",
+          apiHost: "https://api.upstash.com",
+          qstashUrl: "https://qstash.upstash.io",
+          qstashTokenEnvVar: "QSTASH_TOKEN",
+          qstashCurrentSigningKeyEnvVar: "QSTASH_CURRENT_SIGNING_KEY",
+          qstashNextSigningKeyEnvVar: "QSTASH_NEXT_SIGNING_KEY",
+        }),
+      }),
+    ]);
+    expect(
+      checkPolicy(store, { project: "acme-cache", environment: "staging", provider: "upstash" as any, capability: "env_change" }).effect,
+    ).toBe("allow");
+  });
+
+  it("seeds Clerk auth mapping from config", () => {
+    const store = freshStore();
+    const path = writeTempConfig(`
+projects:
+  acme-auth:
+    environments:
+      staging:
+        kind: staging
+        clerk:
+          publishable_key: pk_test_public
+          sign_in_url: /sign-in
+          sign_up_url: /sign-up
+          sign_in_fallback_redirect_url: /dashboard
+          sign_up_fallback_redirect_url: /dashboard
+policy:
+  require_approval:
+    - clerk.env_change
+`);
+    const config = loadConfig(path)!;
+
+    applyConfig(store, config);
+
+    expect(listProviderMappings(store, "acme-auth")).toEqual([
+      expect.objectContaining({
+        provider: "clerk",
+        resource: expect.objectContaining({
+          provider: "clerk",
+          publishableKey: "pk_test_public",
+          signInUrl: "/sign-in",
+          signUpUrl: "/sign-up",
+          signInFallbackRedirectUrl: "/dashboard",
+          signUpFallbackRedirectUrl: "/dashboard",
+        }),
+      }),
+    ]);
+    expect(
+      checkPolicy(store, { project: "acme-auth", environment: "staging", provider: "clerk" as any, capability: "env_change" }).effect,
+    ).toBe("allow");
+  });
+
+  it("seeds Cloudflare R2 object storage mapping from config", () => {
+    const store = freshStore();
+    const path = writeTempConfig(`
+projects:
+  acme-storage:
+    environments:
+      staging:
+        kind: staging
+        cloudflare_r2:
+          account_id: acc_123
+          bucket_name: acme-assets
+          api_host: https://api.cloudflare.com/client/v4
+          jurisdiction: default
+          access_key_id_env_var: R2_ACCESS_KEY_ID
+          secret_access_key_env_var: R2_SECRET_ACCESS_KEY
+          public_url: https://assets.acme.example
+policy:
+  require_approval:
+    - cloudflare_r2.env_change
+`);
+    const config = loadConfig(path)!;
+
+    applyConfig(store, config);
+
+    expect(listProviderMappings(store, "acme-storage")).toEqual([
+      expect.objectContaining({
+        provider: "cloudflare_r2",
+        resource: expect.objectContaining({
+          provider: "cloudflare_r2",
+          accountId: "acc_123",
+          bucketName: "acme-assets",
+          apiHost: "https://api.cloudflare.com/client/v4",
+          jurisdiction: "default",
+          accessKeyIdEnvVar: "R2_ACCESS_KEY_ID",
+          secretAccessKeyEnvVar: "R2_SECRET_ACCESS_KEY",
+          publicUrl: "https://assets.acme.example",
+        }),
+      }),
+    ]);
+    expect(
+      checkPolicy(store, { project: "acme-storage", environment: "staging", provider: "cloudflare_r2" as any, capability: "env_change" }).effect,
+    ).toBe("allow");
+  });
+
   it("fails loudly when config references a missing provider connection", () => {
     const store = freshStore();
     const config = acmeConfig();

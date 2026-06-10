@@ -208,6 +208,27 @@ function validateProviderResource(provider: ProviderId, resource: ProviderResour
     case "railway":
       requireNonEmptyString((resource as Partial<{ projectId: unknown }>).projectId, "railway.projectId");
       return;
+    case "upstash":
+      requireNonEmptyString((resource as Partial<{ databaseId: unknown }>).databaseId, "upstash.databaseId");
+      return;
+    case "cloudflare_r2":
+      requireNonEmptyString((resource as Partial<{ accountId: unknown }>).accountId, "cloudflare_r2.accountId");
+      return;
+    case "sentry":
+      requireNonEmptyString((resource as Partial<{ organizationSlug: unknown }>).organizationSlug, "sentry.organizationSlug");
+      return;
+    case "posthog":
+      requireNonEmptyString((resource as Partial<{ organizationId: unknown }>).organizationId, "posthog.organizationId");
+      return;
+    case "resend":
+      requireNonEmptyString((resource as Partial<{ domain: unknown }>).domain, "resend.domain");
+      return;
+    case "twilio":
+      requireNonEmptyString((resource as Partial<{ accountSid: unknown }>).accountSid, "twilio.accountSid");
+      return;
+    case "clerk":
+      requireNonEmptyString((resource as Partial<{ publishableKey: unknown }>).publishableKey, "clerk.publishableKey");
+      return;
   }
 }
 

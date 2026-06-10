@@ -10,9 +10,38 @@
  * never persisted to disk (see ProviderConnection.auth).
  */
 
-export type ProviderId = "github" | "vercel" | "supabase" | "stripe" | "railway" | "namecheap" | "neon";
+export type ProviderId =
+  | "github"
+  | "vercel"
+  | "supabase"
+  | "stripe"
+  | "railway"
+  | "namecheap"
+  | "neon"
+  | "upstash"
+  | "cloudflare_r2"
+  | "sentry"
+  | "posthog"
+  | "resend"
+  | "twilio"
+  | "clerk";
 
-export const PROVIDER_IDS: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway", "namecheap", "neon"];
+export const PROVIDER_IDS: ProviderId[] = [
+  "github",
+  "vercel",
+  "supabase",
+  "stripe",
+  "railway",
+  "namecheap",
+  "neon",
+  "upstash",
+  "cloudflare_r2",
+  "sentry",
+  "posthog",
+  "resend",
+  "twilio",
+  "clerk",
+];
 
 /** How "production-like" an environment is. Drives default policy. */
 export type EnvironmentKind = "development" | "staging" | "production";
@@ -121,12 +150,101 @@ export interface RailwayResource {
   projectName?: string;
 }
 
+export interface TwilioResource {
+  /** Twilio Account SID, e.g. ACxxxxxxxx. Not secret; paired with TWILIO_AUTH_TOKEN at call time. */
+  accountSid: string;
+  /** Default sender for SMS/calls when a tool call does not pass an explicit sender. */
+  fromNumber?: string;
+  /** Optional Messaging Service SID for outbound SMS. */
+  messagingServiceSid?: string;
+}
+
+export interface ResendResource {
+  /** Primary sending domain, e.g. example.com. Not secret. */
+  domain: string;
+  /** Default From header, e.g. "Acme <onboarding@example.com>". */
+  defaultFrom?: string;
+}
+
+export interface SentryResource {
+  /** Sentry organization slug, e.g. acme. Not secret. */
+  organizationSlug: string;
+  /** Optional mapped project slug used for SENTRY_DSN/client-key actions. */
+  projectSlug?: string;
+  /** Optional team slug used when creating projects through the team endpoint. */
+  teamSlug?: string;
+}
+
+export interface UpstashResource {
+  /** Upstash Redis database id. Not secret; credentials are read from the Developer API at call time. */
+  databaseId: string;
+  /** Optional Upstash Developer API host override for tests/self-hosting proxies. */
+  apiHost?: string;
+  /** Optional QStash API URL. Defaults to https://qstash.upstash.io. */
+  qstashUrl?: string;
+  /** Env var name that holds the QStash API token for background jobs/schedules. */
+  qstashTokenEnvVar?: string;
+  /** Env var name that holds the current QStash signing key for app verification. */
+  qstashCurrentSigningKeyEnvVar?: string;
+  /** Env var name that holds the next QStash signing key for app verification. */
+  qstashNextSigningKeyEnvVar?: string;
+}
+
+export interface CloudflareR2Resource {
+  /** Cloudflare account id. Not secret; paired with CLOUDFLARE_API_TOKEN at call time. */
+  accountId: string;
+  /** Optional default R2 bucket for app env wiring and object listing. */
+  bucketName?: string;
+  /** Optional Cloudflare API host override for tests/proxies. */
+  apiHost?: string;
+  /** R2 jurisdiction for bucket operations. Defaults to Cloudflare's default jurisdiction. */
+  jurisdiction?: "default" | "eu" | "fedramp";
+  /** Env var name that holds the S3-compatible R2 access key id for app code. */
+  accessKeyIdEnvVar?: string;
+  /** Env var name that holds the S3-compatible R2 secret access key for app code. */
+  secretAccessKeyEnvVar?: string;
+  /** Optional public/custom asset URL for app code. */
+  publicUrl?: string;
+}
+
+export interface PostHogResource {
+  /** PostHog organization id used by private project APIs. Not secret. */
+  organizationId: string;
+  /** Optional PostHog project id used for feature flags and client env wiring. */
+  projectId?: string;
+  /** Private PostHog app/API host, e.g. https://us.posthog.com. */
+  apiHost?: string;
+  /** Public capture/SDK host, e.g. https://us.i.posthog.com. */
+  ingestHost?: string;
+}
+
+export interface ClerkResource {
+  /** Clerk Publishable Key, e.g. pk_test_... or pk_live_.... Safe for client env wiring. */
+  publishableKey: string;
+  /** Optional Backend API host override for tests/proxies. Defaults to https://api.clerk.com. */
+  apiHost?: string;
+  /** Optional Frontend API URL override. Usually inferred from the primary Clerk domain. */
+  frontendApiUrl?: string;
+  /** Optional sign-in/sign-up routes exposed to frontend frameworks. */
+  signInUrl?: string;
+  signUpUrl?: string;
+  signInFallbackRedirectUrl?: string;
+  signUpFallbackRedirectUrl?: string;
+}
+
 export type ProviderResource =
   | ({ provider: "github" } & GithubResource)
   | ({ provider: "vercel" } & VercelResource)
   | ({ provider: "supabase" } & SupabaseResource)
   | ({ provider: "stripe" } & StripeResource)
-  | ({ provider: "railway" } & RailwayResource);
+  | ({ provider: "railway" } & RailwayResource)
+  | ({ provider: "upstash" } & UpstashResource)
+  | ({ provider: "cloudflare_r2" } & CloudflareR2Resource)
+  | ({ provider: "sentry" } & SentryResource)
+  | ({ provider: "posthog" } & PostHogResource)
+  | ({ provider: "resend" } & ResendResource)
+  | ({ provider: "twilio" } & TwilioResource)
+  | ({ provider: "clerk" } & ClerkResource);
 
 export interface ProviderMapping {
   id: string;

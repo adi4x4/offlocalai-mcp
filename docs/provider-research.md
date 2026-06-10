@@ -14,6 +14,11 @@ only; tokens are read at call time and never persisted.
 | Vercel | Account/team token | `VERCEL_TOKEN`, `VERCEL_TEAM_ID?` |
 | Supabase | Personal Access Token | `SUPABASE_ACCESS_TOKEN` |
 | Stripe | Secret keys (test+live) | `STRIPE_TEST_SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY` |
+| Upstash | Basic auth with email + API key | `UPSTASH_EMAIL`, `UPSTASH_API_KEY` |
+| Sentry | Bearer auth token | `SENTRY_AUTH_TOKEN` |
+| PostHog | Personal API key | `POSTHOG_PERSONAL_API_KEY` |
+| Resend | Bearer API key | `RESEND_API_KEY` |
+| Twilio | Account SID + auth token | mapping `accountSid`, env `TWILIO_AUTH_TOKEN` |
 
 ---
 
@@ -27,7 +32,7 @@ _Researched against docs.github.com, current as of 2026-06-08._
 - **Auth header:** `Authorization: Bearer <TOKEN>`. Also send `Accept: application/vnd.github+json`.
 
 ### Auth model
-- **Fine-grained PAT via `GITHUB_TOKEN`.** No callback flow, least-privilege per repo. Grant **Metadata: read** (mandatory) + **Contents: read** for the read path; add **Contents: write** only when writes are enabled (off by default). Classic PAT works but is coarser.
+- **Fine-grained PAT via `GITHUB_TOKEN`.** No callback flow, least-privilege per repo. Grant **Metadata: read** (mandatory), **Contents: read** for repo context, and **Actions: read** for CI diagnostics; add **Actions: write** only when rerun/cancel tools are enabled. Classic PAT works but is coarser.
 
 ### Key endpoints
 | Purpose | Method + Path | Permission |
@@ -36,6 +41,10 @@ _Researched against docs.github.com, current as of 2026-06-08._
 | Get README | `GET /repos/{owner}/{repo}/readme` | Contents: read |
 | Get file/dir contents | `GET /repos/{owner}/{repo}/contents/{path}` | Contents: read |
 | List branches | `GET /repos/{owner}/{repo}/branches` | Contents: read |
+| List workflow runs | `GET /repos/{owner}/{repo}/actions/runs` | Actions: read |
+| List workflow jobs | `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` | Actions: read |
+| Re-run workflow run | `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun` | Actions: write |
+| Cancel workflow run | `POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel` | Actions: write |
 | List deployments | `GET /repos/{owner}/{repo}/deployments` | Deployments: read |
 | Create/update a file (write) | `PUT /repos/{owner}/{repo}/contents/{path}` | Contents: write |
 | Delete a file (write) | `DELETE /repos/{owner}/{repo}/contents/{path}` | Contents: write |
@@ -46,7 +55,8 @@ Default branch is the `default_branch` field on the repo object (no separate end
 - PAT / authenticated user: 5,000 req/hour. Secondary limits: ≤100 concurrent, content-creating writes ≤80/min & ≤500/hr. Honor `x-ratelimit-remaining` / `x-ratelimit-reset`.
 
 ### Safe vs dangerous
-- **Safe (read-only GETs, V0 surface):** get repo, get README, get contents, list branches, list deployments.
+- **Safe (read-only GETs):** get repo, get README, get contents, list branches, list deployments, list workflow runs/jobs.
+- **Governed writes:** rerun/cancel workflow runs. These can spend CI minutes or interrupt checks, so they go through DashClaw policy.
 - **Dangerous (gate / never expose):** `DELETE .../contents/{path}` (file delete), `DELETE /repos/{owner}/{repo}` (repo delete — **not exposed in V0**), force ref updates, branch deletion, workflow-file writes (need extra scope).
 
 ### Scoping
@@ -179,6 +189,221 @@ Nested fields use bracket syntax: `recurring[interval]=month`, `product_data[nam
 - Implement form-encoding incl. bracketed nested params (Stripe is not JSON-in).
 - Add idempotency-key support; pagination for lists.
 - Out of scope for V0: webhooks and broader resources (subscriptions/invoices/payment links).
+
+---
+
+## Upstash Redis
+
+_Researched against official Upstash Developer API, Redis REST, and QStash REST docs on 2026-06-10._
+
+### Base URL, auth & scoping
+- **Developer API base URL:** `https://api.upstash.com/v2`.
+- **Auth:** Upstash Developer API uses HTTP Basic auth with username `EMAIL` and password `API_KEY`; store them as `UPSTASH_EMAIL` and `UPSTASH_API_KEY`.
+- **QStash API URL:** `https://qstash.upstash.io` by default; region-specific URLs include `https://qstash-us-east-1.upstash.io` and `https://qstash-eu-central-1.upstash.io`.
+- **QStash auth:** QStash REST uses `Authorization: Bearer <QSTASH_TOKEN>`.
+- **Resource model:** account → Redis database plus QStash region. A mapping stores the non-secret Redis `databaseId`, optional Developer API host override, optional QStash URL, and QStash env-var names.
+- **App env model:** applications using `@upstash/redis` consume `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN`; a read-only token can be wired as `UPSTASH_REDIS_READ_ONLY_REST_TOKEN` when available.
+- **QStash app env model:** applications using QStash consume `QSTASH_URL`, `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, and `QSTASH_NEXT_SIGNING_KEY`. Current/next signing keys let apps verify incoming QStash requests during key rotation.
+
+### Key endpoints
+| Action | Method + path | Notes |
+|---|---|---|
+| List Redis databases | `GET /redis/databases` | account-level read; adapter strips credential-shaped fields if returned |
+| Get Redis database | `GET /redis/database/{id}` | returns database details; docs expose `credentials=hide` to remove credentials |
+| Create Redis database | `POST /redis/database` | body includes `database_name`, `platform`, `primary_region`, optional `read_regions`, `plan`, `budget`, `eviction`, `tls` |
+| Get QStash signing keys | `GET /v2/keys` | returns current and next signing keys for app request verification |
+| List QStash schedules | `GET /v2/schedules` | returns cron schedules; adapter strips stored request body/header details |
+| Create QStash schedule | `POST /v2/schedules/{destination}` | requires `Upstash-Cron`; adapter sets `Upstash-Redact-Fields: body, headers` |
+
+### Safe vs dangerous
+- **Safe/read:** list databases, list QStash schedules, fetch Redis env wiring, and fetch QStash env wiring. Env wiring may include REST tokens or signing keys in the tool result, so summaries and resource labels name only non-secret resources.
+- **Governed setup/env change:** create Redis databases and QStash schedules because they provision product infrastructure and return or depend on environment variables intended for app deployment.
+- **Secret handling:** never include `UPSTASH_API_KEY`, `UPSTASH_REDIS_REST_TOKEN`, Redis passwords, read-only REST tokens, `QSTASH_TOKEN`, QStash signing keys, QStash schedule bodies, or forwarded headers in audit summaries or DashClaw payloads. List actions return credential-free summaries.
+
+### Limitations / TODOs
+- V0 manages Redis database creation/env wiring and QStash schedule/env wiring only. It does not delete databases, change plans, reset passwords, configure backups, publish one-off QStash messages, manage queues/URL groups/DLQ, rotate QStash signing keys, or manage Vector/Search resources.
+- The Developer API is only available to native Upstash accounts; marketplace-created accounts may not support it.
+
+---
+
+## Cloudflare R2
+
+_Researched against official Cloudflare R2 and Cloudflare API docs on 2026-06-10._
+
+### Base URL, auth & app env model
+- **Cloudflare API base URL:** `https://api.cloudflare.com/client/v4`.
+- **Auth:** Cloudflare API token in `Authorization: Bearer <CLOUDFLARE_API_TOKEN>`.
+- **Resource model:** account -> R2 bucket. A mapping stores the non-secret `accountId`, optional default `bucketName`, optional `jurisdiction`, and optional public/custom asset URL.
+- **App env model:** S3-compatible app clients use `R2_ACCOUNT_ID`, `R2_BUCKET_NAME`, `R2_ENDPOINT`, `R2_REGION=auto`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY`. The endpoint is `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`; jurisdictional buckets use `https://<ACCOUNT_ID>.eu.r2.cloudflarestorage.com` or `https://<ACCOUNT_ID>.fedramp.r2.cloudflarestorage.com`.
+
+### Key endpoints
+| Action | Method + path | Notes |
+|---|---|---|
+| List buckets | `GET /accounts/{account_id}/r2/buckets` | returns bucket summaries under `result.buckets` plus `result_info` pagination |
+| Create bucket | `POST /accounts/{account_id}/r2/buckets` | body includes `name`, optional `locationHint`, optional `storageClass`; optional `cf-r2-jurisdiction` header |
+| List objects | `GET /accounts/{account_id}/r2/buckets/{bucket_name}/objects` | accepts `prefix`, `cursor`, and `per_page`; returns object metadata only |
+
+### Safe vs dangerous
+- **Safe/read:** list buckets, list object summaries, and return app env wiring for a mapped bucket. Object listing returns metadata only, not object bodies.
+- **Governed setup/env change:** create buckets because this provisions storage and returns environment variables intended for app deployment.
+- **Secret handling:** never include `CLOUDFLARE_API_TOKEN`, `R2_ACCESS_KEY_ID`, or `R2_SECRET_ACCESS_KEY` in audit summaries or DashClaw payloads. `get_cloudflare_r2_env` returns app credentials to the calling agent only so they can be set as deployment env vars.
+
+### Limitations / TODOs
+- V0 manages bucket creation, bucket/object listing, and env wiring only. It does not upload/download/delete objects, configure CORS, custom domains, lifecycle rules, event notifications, locks, or temporary credentials.
+- R2 API-token creation is intentionally not automated in V0; operators create/scoped tokens in Cloudflare and provide env vars to the MCP process.
+
+---
+
+## Sentry
+
+_Researched against official Sentry API docs on 2026-06-10._
+
+### Base URL, auth & org scoping
+- **Base URL:** `https://sentry.io/api/0`.
+- **Auth:** `Authorization: Bearer <SENTRY_AUTH_TOKEN>`.
+- **Token model:** Sentry recommends organization auth tokens from internal integrations for API automation. Store the token in the MCP env block; store non-secret organization/project/team slugs in the provider mapping.
+- **Resource model:** organization → team → project → client key. A client key exposes a public DSN used by SDKs as `SENTRY_DSN`; Sentry also returns a secret DSN, which the adapter strips from tool results.
+
+### Key endpoints
+| Action | Method + path | Notes |
+|---|---|---|
+| List organization projects | `GET /organizations/{org}/projects/` | accepts `per_page` and `query` |
+| Create project for org | `POST /organizations/{org}/projects/` | body includes `name`, optional `slug`, `platform`, `default_rules` |
+| Create project for team | `POST /teams/{org}/{team}/projects/` | used when mapping/input has `teamSlug` |
+| List project client keys | `GET /projects/{org}/{project}/keys/` | returns public + secret DSNs; adapter returns public DSN only |
+| Create project client key | `POST /projects/{org}/{project}/keys/` | optional `name`, `useCase`, and `rateLimit` |
+| List organization releases | `GET /organizations/{org}/releases/` | optional starts-with `query` filter |
+| Create organization release | `POST /organizations/{org}/releases/` | requires `version` and `projects`; optional `ref`, `url`, `dateReleased` |
+| List release deploys | `GET /organizations/{org}/releases/{version}/deploys/` | returns deploy markers for a release |
+| Create release deploy | `POST /organizations/{org}/releases/{version}/deploys/` | requires deploy `environment`; optional `name`, `url`, dates, projects |
+
+### Safe vs dangerous
+- **Safe/read:** list projects and client keys after stripping secret DSNs.
+- **Governed setup/write:** create projects/client keys because they change production observability wiring and create values intended for environment variables. Create releases as governed writes so they are audited.
+- **Deploy evidence:** create deploy markers with the `deploy` capability. A marker for Sentry environment `production` is treated as live so DashClaw is consulted even if the local offlocal environment input is not production.
+- **Secret handling:** never write `dsn.secret` or the returned `secret` key to audit, DashClaw context, or tool results. Return only `publicDsn` for `SENTRY_DSN` wiring.
+
+### Limitations / TODOs
+- V0 does not manage alert rules, issue assignment, source maps, monitors/crons, or ownership rules.
+- Release/deploy markers are explicit tool calls; they are not yet auto-chained after Vercel/Railway deploys.
+
+---
+
+## PostHog
+
+_Researched against official PostHog API docs on 2026-06-10._
+
+### Base URL, auth & scoping
+- **Private API hosts:** US Cloud uses `https://us.posthog.com`; EU Cloud uses `https://eu.posthog.com`. Public capture/SDK hosts are `https://us.i.posthog.com` and `https://eu.i.posthog.com`. Self-hosted instances use their own domain.
+- **Auth:** private APIs use `Authorization: Bearer <POSTHOG_PERSONAL_API_KEY>`.
+- **Token model:** store the personal API key in the MCP env block. Store non-secret organization id, project id, and optional host overrides in the provider mapping.
+- **Resource model:** organization → project → feature flags. Project responses include public `api_token` for client SDK wiring and private `secret_api_token` fields; the adapter returns only the public project token.
+
+### Key endpoints
+| Action | Method + path | Notes |
+|---|---|---|
+| List organization projects | `GET /api/organizations/{organization_id}/projects/` | accepts `limit`, `offset`, and `search`; requires `project:read` |
+| Create organization project | `POST /api/organizations/{organization_id}/projects/` | accepts `name`, optional product/app/session settings; requires `project:write` |
+| Retrieve project | `GET /api/organizations/{organization_id}/projects/{id}/` | used to return client-safe env wiring |
+| List feature flags | `GET /api/projects/{project_id}/feature_flags/` | accepts `limit`, `search`, `active`, and `type`; requires `feature_flag:read` |
+| Create feature flag | `POST /api/projects/{project_id}/feature_flags/` | accepts `key`, `name`, `filters`, `active`, `tags`; requires `feature_flag:write` |
+
+### Safe vs dangerous
+- **Safe/read:** list projects, retrieve client-safe env wiring, and list feature flags. Private project secret fields are stripped.
+- **Governed setup/env change:** create projects because the result is intended for app environment variables (`NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST`, `POSTHOG_PROJECT_ID`).
+- **Governed write:** create feature flags because they can change product behavior. The offlocal tool creates flags inactive by default; production flag writes require approval by default.
+- **Secret handling:** never return `secret_api_token` or `secret_api_token_backup`. The public project token (`api_token`) is returned as `NEXT_PUBLIC_POSTHOG_KEY` because PostHog uses it for public capture and flags endpoints.
+
+### Limitations / TODOs
+- V0 does not update/delete feature flags, manage experiments, run HogQL/query API calls, or configure product analytics dashboards.
+- Feature-flag creation exposes PostHog's `filters` object directly instead of a full rule builder.
+
+---
+
+## Clerk
+
+_Researched against official Clerk docs and the public Clerk OpenAPI BAPI spec on 2026-06-10._
+
+### Base URL, auth & app env model
+- **Backend API base URL:** `https://api.clerk.com/v1`.
+- **Auth:** HTTP bearer auth using `CLERK_SECRET_KEY`.
+- **Env/model:** store the Secret Key in the MCP env block. Store non-secret `publishableKey`, optional sign-in/sign-up route envs, and optional API/FAPI URL overrides in the provider mapping.
+- **Frontend env wiring:** Clerk frontend SDKs use `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`; optional route envs include `NEXT_PUBLIC_CLERK_SIGN_IN_URL`, `NEXT_PUBLIC_CLERK_SIGN_UP_URL`, `NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL`, and `NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL`.
+
+### Key endpoints
+| Action | Method + path | Notes |
+|---|---|---|
+| List users | `GET /users` | accepts `limit`, `offset`, and `query`; adapter returns small user summaries and strips metadata |
+| List domains | `GET /domains` | returns primary/satellite domains and `frontend_api_url`; used by `get_clerk_app_env` |
+| List redirect URLs | `GET /redirect_urls` | accepts `limit` and `offset` |
+| Create redirect URL | `POST /redirect_urls` | body `{ "url": "https://..." }` or custom-scheme URL |
+
+### Safe vs dangerous
+- **Safe/read:** return client-safe app env wiring, list domains, list redirect URLs, and list user summaries.
+- **Governed env change:** create redirect URLs because it changes authentication callback allowlists.
+- **Secret handling:** never return or audit `CLERK_SECRET_KEY`. `get_clerk_app_env` returns the secret env var name, not the secret value.
+- **PII handling:** user list results can include a primary email for operator identification, but audit/DashClaw summaries do not include user queries, emails, metadata, or returned user payloads.
+
+### Limitations / TODOs
+- V0 does not create Clerk applications, manage social/SAML connections, create users, update instance settings, or manage Clerk webhooks.
+- Publishable keys are mapped manually because the BAPI endpoints used here do not expose API-key creation/rotation.
+
+---
+
+## Resend
+
+_Researched against official Resend docs on 2026-06-10._
+
+### Base URL, auth & request requirements
+- **Base URL:** `https://api.resend.com`.
+- **Auth:** `Authorization: Bearer <RESEND_API_KEY>`.
+- **User-Agent:** Resend rejects direct HTTP requests without a `User-Agent`; the adapter sends one on every request.
+- **Env/model:** store non-secret domain/default sender in the provider mapping; read `RESEND_API_KEY` from env at call time.
+
+### Key endpoints
+| Action | Method + path | Notes |
+|---|---|---|
+| Send email | `POST /emails` | body includes `from`, `to`, `subject`, and `html` and/or `text` |
+| List domains | `GET /domains` | returns domain status/capabilities |
+| Create domain | `POST /domains` | returns DNS records for SPF/DKIM/tracking |
+| Verify domain | `POST /domains/{domainId}/verify` | starts asynchronous verification |
+
+### Safe vs dangerous
+- **Safe/read:** list domains and inspect status.
+- **Governed env change:** create and verify sending domains because it changes production email/DNS setup.
+- **Live external side effects:** sending email reaches real people and can include secrets or PII. Treat it as a `live` write even in staging. Do not place recipients, subject, HTML, or text bodies in audit summaries or DashClaw payloads.
+
+### Limitations / TODOs
+- V0 does not manage audiences, broadcasts, templates, API keys, inbound emails, or webhooks.
+- Add stronger email-address validation and attachment controls before expanding send scope.
+
+---
+
+## Twilio
+
+_Researched against official Twilio docs on 2026-06-10._
+
+### Base URL, auth & account scoping
+- **Base URL:** `https://api.twilio.com/2010-04-01`.
+- **Auth:** HTTP Basic auth, username = Account SID, password = auth token.
+- **Env/model:** store non-secret `accountSid` in the provider mapping; read `TWILIO_AUTH_TOKEN` from env at call time. Do not persist the auth token.
+
+### Key endpoints (bodies are form-encoded)
+| Action | Method + path | Notes |
+|---|---|---|
+| List phone numbers | `GET /Accounts/{AccountSid}/IncomingPhoneNumbers.json` | returns configured numbers and webhook URLs |
+| Update phone number webhooks | `POST /Accounts/{AccountSid}/IncomingPhoneNumbers/{PhoneNumberSid}.json` | fields `SmsUrl`, `VoiceUrl` |
+| Send SMS | `POST /Accounts/{AccountSid}/Messages.json` | fields `To`, `Body`, plus `From` or `MessagingServiceSid` |
+| Create voice call | `POST /Accounts/{AccountSid}/Calls.json` | fields `To`, `From`, `Url` |
+
+### Safe vs dangerous
+- **Safe/read:** list phone numbers and inspect configured webhook URLs.
+- **Governed env change:** update inbound SMS/voice webhook URLs.
+- **Live external side effects:** sending SMS and creating calls cost money and contact real people. Treat them as `live` writes even in staging. Do not place message bodies or recipient phone numbers in audit summaries or DashClaw payloads.
+
+### Limitations / TODOs
+- V0 does not purchase Twilio numbers, manage messaging services, or read message/call logs.
+- Add stronger E.164 validation and compliance guidance before expanding beyond test/operator-owned numbers.
 
 ---
 

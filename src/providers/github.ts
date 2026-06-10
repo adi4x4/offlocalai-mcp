@@ -52,6 +52,10 @@ export async function getRepoContext(
   };
 }
 
+function optionalNumberField(value: Record<string, any>, key: string): number | undefined {
+  return typeof value[key] === "number" && Number.isFinite(value[key]) ? value[key] : undefined;
+}
+
 export async function getReadme(
   token: string,
   owner: string,
@@ -195,4 +199,162 @@ export async function getCombinedStatus(
         })
       : [],
   };
+}
+
+export interface GithubWorkflowRun {
+  id: number;
+  name?: string;
+  title?: string;
+  status: string;
+  conclusion?: string;
+  event?: string;
+  headBranch?: string;
+  headSha?: string;
+  runAttempt?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  htmlUrl?: string;
+  workflowId?: number;
+}
+
+export interface GithubWorkflowRunList {
+  totalCount: number;
+  workflowRuns: GithubWorkflowRun[];
+}
+
+export async function listWorkflowRuns(
+  token: string,
+  owner: string,
+  repo: string,
+  opts: { branch?: string; event?: string; status?: string; limit?: number } = {},
+): Promise<GithubWorkflowRunList> {
+  const data = await httpJson<Record<string, any>>(`${BASE}/repos/${owner}/${repo}/actions/runs`, {
+    headers: headers(token),
+    query: {
+      branch: opts.branch,
+      event: opts.event,
+      status: opts.status,
+      per_page: String(opts.limit ?? 30),
+    },
+  });
+  const runs = objectShape(data, "GitHub workflow runs");
+  return {
+    totalCount: optionalNumberField(runs, "total_count") ?? 0,
+    workflowRuns: arrayShape(runs.workflow_runs ?? [], "GitHub workflow runs").map((entry: unknown) => {
+      const run = objectShape(entry, "GitHub workflow run");
+      return {
+        id: optionalNumberField(run, "id") ?? 0,
+        name: optionalStringField(run, "name"),
+        title: optionalStringField(run, "display_title"),
+        status: stringField(run, "status", "GitHub workflow run"),
+        conclusion: optionalStringField(run, "conclusion"),
+        event: optionalStringField(run, "event"),
+        headBranch: optionalStringField(run, "head_branch"),
+        headSha: optionalStringField(run, "head_sha"),
+        runAttempt: optionalNumberField(run, "run_attempt"),
+        createdAt: optionalStringField(run, "created_at"),
+        updatedAt: optionalStringField(run, "updated_at"),
+        htmlUrl: optionalStringField(run, "html_url"),
+        workflowId: optionalNumberField(run, "workflow_id"),
+      };
+    }),
+  };
+}
+
+export interface GithubWorkflowJobStep {
+  name: string;
+  status?: string;
+  conclusion?: string;
+  number?: number;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface GithubWorkflowJob {
+  id: number;
+  runId?: number;
+  name: string;
+  status: string;
+  conclusion?: string;
+  startedAt?: string;
+  completedAt?: string;
+  htmlUrl?: string;
+  steps?: GithubWorkflowJobStep[];
+}
+
+export interface GithubWorkflowJobList {
+  totalCount: number;
+  jobs: GithubWorkflowJob[];
+}
+
+export async function listWorkflowJobs(
+  token: string,
+  owner: string,
+  repo: string,
+  runId: number,
+  opts: { filter?: "latest" | "all"; limit?: number } = {},
+): Promise<GithubWorkflowJobList> {
+  const data = await httpJson<Record<string, any>>(`${BASE}/repos/${owner}/${repo}/actions/runs/${runId}/jobs`, {
+    headers: headers(token),
+    query: {
+      filter: opts.filter,
+      per_page: String(opts.limit ?? 30),
+    },
+  });
+  const jobs = objectShape(data, "GitHub workflow jobs");
+  return {
+    totalCount: optionalNumberField(jobs, "total_count") ?? 0,
+    jobs: arrayShape(jobs.jobs ?? [], "GitHub workflow jobs").map((entry: unknown) => {
+      const job = objectShape(entry, "GitHub workflow job");
+      return {
+        id: optionalNumberField(job, "id") ?? 0,
+        runId: optionalNumberField(job, "run_id"),
+        name: stringField(job, "name", "GitHub workflow job"),
+        status: stringField(job, "status", "GitHub workflow job"),
+        conclusion: optionalStringField(job, "conclusion"),
+        startedAt: optionalStringField(job, "started_at"),
+        completedAt: optionalStringField(job, "completed_at"),
+        htmlUrl: optionalStringField(job, "html_url"),
+        steps: Array.isArray(job.steps)
+          ? job.steps.map((entry: unknown) => {
+              const step = objectShape(entry, "GitHub workflow job step");
+              return {
+                name: stringField(step, "name", "GitHub workflow job step"),
+                status: optionalStringField(step, "status"),
+                conclusion: optionalStringField(step, "conclusion"),
+                number: optionalNumberField(step, "number"),
+                startedAt: optionalStringField(step, "started_at"),
+                completedAt: optionalStringField(step, "completed_at"),
+              };
+            })
+          : undefined,
+      };
+    }),
+  };
+}
+
+export async function rerunWorkflowRun(
+  token: string,
+  owner: string,
+  repo: string,
+  runId: number,
+): Promise<{ runId: number; rerun: true }> {
+  await httpJson(`${BASE}/repos/${owner}/${repo}/actions/runs/${runId}/rerun`, {
+    method: "POST",
+    headers: headers(token),
+  });
+  return { runId, rerun: true };
+}
+
+export async function cancelWorkflowRun(
+  token: string,
+  owner: string,
+  repo: string,
+  runId: number,
+): Promise<{ runId: number; canceled: true }> {
+  await httpJson(`${BASE}/repos/${owner}/${repo}/actions/runs/${runId}/cancel`, {
+    method: "POST",
+    headers: headers(token),
+  });
+  return { runId, canceled: true };
 }

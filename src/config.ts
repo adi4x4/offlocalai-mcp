@@ -40,6 +40,39 @@ interface ConfigEnvironment {
   supabase?: { project_ref: string; connection_id?: string };
   stripe?: { mode: "test" | "live"; connection_id?: string };
   railway?: { project_id: string; environment_id?: string; service_id?: string; connection_id?: string };
+  upstash?: {
+    database_id: string;
+    api_host?: string;
+    qstash_url?: string;
+    qstash_token_env_var?: string;
+    qstash_current_signing_key_env_var?: string;
+    qstash_next_signing_key_env_var?: string;
+    connection_id?: string;
+  };
+  cloudflare_r2?: {
+    account_id: string;
+    bucket_name?: string;
+    api_host?: string;
+    jurisdiction?: "default" | "eu" | "fedramp";
+    access_key_id_env_var?: string;
+    secret_access_key_env_var?: string;
+    public_url?: string;
+    connection_id?: string;
+  };
+  sentry?: { organization_slug: string; project_slug?: string; team_slug?: string; connection_id?: string };
+  posthog?: { organization_id: string; project_id?: string; api_host?: string; ingest_host?: string; connection_id?: string };
+  resend?: { domain: string; default_from?: string; connection_id?: string };
+  twilio?: { account_sid: string; from_number?: string; messaging_service_sid?: string; connection_id?: string };
+  clerk?: {
+    publishable_key: string;
+    api_host?: string;
+    frontend_api_url?: string;
+    sign_in_url?: string;
+    sign_up_url?: string;
+    sign_in_fallback_redirect_url?: string;
+    sign_up_fallback_redirect_url?: string;
+    connection_id?: string;
+  };
 }
 
 interface ConfigMemory {
@@ -163,6 +196,73 @@ function validateEnvironmentConfig(value: unknown, field: string): void {
     optionalString(railway.environment_id, `${field}.railway.environment_id`);
     optionalString(railway.service_id, `${field}.railway.service_id`);
   }
+
+  const upstash = validateProviderBlock(value.upstash, `${field}.upstash`);
+  if (upstash) {
+    requiredString(upstash.database_id, `${field}.upstash.database_id`);
+    optionalString(upstash.api_host, `${field}.upstash.api_host`);
+    optionalString(upstash.qstash_url, `${field}.upstash.qstash_url`);
+    optionalString(upstash.qstash_token_env_var, `${field}.upstash.qstash_token_env_var`);
+    optionalString(upstash.qstash_current_signing_key_env_var, `${field}.upstash.qstash_current_signing_key_env_var`);
+    optionalString(upstash.qstash_next_signing_key_env_var, `${field}.upstash.qstash_next_signing_key_env_var`);
+  }
+
+  const cloudflareR2 = validateProviderBlock(value.cloudflare_r2, `${field}.cloudflare_r2`);
+  if (cloudflareR2) {
+    requiredString(cloudflareR2.account_id, `${field}.cloudflare_r2.account_id`);
+    optionalString(cloudflareR2.bucket_name, `${field}.cloudflare_r2.bucket_name`);
+    optionalString(cloudflareR2.api_host, `${field}.cloudflare_r2.api_host`);
+    if (
+      cloudflareR2.jurisdiction !== undefined &&
+      cloudflareR2.jurisdiction !== "default" &&
+      cloudflareR2.jurisdiction !== "eu" &&
+      cloudflareR2.jurisdiction !== "fedramp"
+    ) {
+      throw new OfflocalError(`Invalid config: ${field}.cloudflare_r2.jurisdiction must be default, eu, or fedramp.`);
+    }
+    optionalString(cloudflareR2.access_key_id_env_var, `${field}.cloudflare_r2.access_key_id_env_var`);
+    optionalString(cloudflareR2.secret_access_key_env_var, `${field}.cloudflare_r2.secret_access_key_env_var`);
+    optionalString(cloudflareR2.public_url, `${field}.cloudflare_r2.public_url`);
+  }
+
+  const sentry = validateProviderBlock(value.sentry, `${field}.sentry`);
+  if (sentry) {
+    requiredString(sentry.organization_slug, `${field}.sentry.organization_slug`);
+    optionalString(sentry.project_slug, `${field}.sentry.project_slug`);
+    optionalString(sentry.team_slug, `${field}.sentry.team_slug`);
+  }
+
+  const posthog = validateProviderBlock(value.posthog, `${field}.posthog`);
+  if (posthog) {
+    requiredString(posthog.organization_id, `${field}.posthog.organization_id`);
+    optionalString(posthog.project_id, `${field}.posthog.project_id`);
+    optionalString(posthog.api_host, `${field}.posthog.api_host`);
+    optionalString(posthog.ingest_host, `${field}.posthog.ingest_host`);
+  }
+
+  const resend = validateProviderBlock(value.resend, `${field}.resend`);
+  if (resend) {
+    requiredString(resend.domain, `${field}.resend.domain`);
+    optionalString(resend.default_from, `${field}.resend.default_from`);
+  }
+
+  const twilio = validateProviderBlock(value.twilio, `${field}.twilio`);
+  if (twilio) {
+    requiredString(twilio.account_sid, `${field}.twilio.account_sid`);
+    optionalString(twilio.from_number, `${field}.twilio.from_number`);
+    optionalString(twilio.messaging_service_sid, `${field}.twilio.messaging_service_sid`);
+  }
+
+  const clerk = validateProviderBlock(value.clerk, `${field}.clerk`);
+  if (clerk) {
+    requiredString(clerk.publishable_key, `${field}.clerk.publishable_key`);
+    optionalString(clerk.api_host, `${field}.clerk.api_host`);
+    optionalString(clerk.frontend_api_url, `${field}.clerk.frontend_api_url`);
+    optionalString(clerk.sign_in_url, `${field}.clerk.sign_in_url`);
+    optionalString(clerk.sign_up_url, `${field}.clerk.sign_up_url`);
+    optionalString(clerk.sign_in_fallback_redirect_url, `${field}.clerk.sign_in_fallback_redirect_url`);
+    optionalString(clerk.sign_up_fallback_redirect_url, `${field}.clerk.sign_up_fallback_redirect_url`);
+  }
 }
 
 function validateMemoryConfig(value: unknown, field: string): void {
@@ -252,7 +352,22 @@ function tokenToMatch(token: string): { provider?: ProviderId; capability: Capab
   const parts = token.trim().split(".");
   const head = parts[0]!;
   const rest = parts.slice(1).join(".");
-  const knownProviders: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway", "namecheap", "neon"];
+  const knownProviders: ProviderId[] = [
+    "github",
+    "vercel",
+    "supabase",
+    "stripe",
+    "railway",
+    "namecheap",
+    "neon",
+    "upstash",
+    "cloudflare_r2",
+    "sentry",
+    "posthog",
+    "resend",
+    "twilio",
+    "clerk",
+  ];
   if (head !== "provider" && head !== "*" && !knownProviders.includes(head as ProviderId)) {
     return null;
   }
@@ -312,6 +427,94 @@ function environmentResource(provider: ProviderId, env: ConfigEnvironment): Prov
         environmentId: env.railway.environment_id,
         serviceId: env.railway.service_id,
       };
+    case "upstash":
+      if (!env.upstash) return null;
+      if (!env.upstash.database_id?.trim()) {
+        throw new OfflocalError("Invalid upstash database_id in config; expected a non-empty database id.");
+      }
+      return {
+        provider,
+        databaseId: env.upstash.database_id,
+        apiHost: env.upstash.api_host,
+        qstashUrl: env.upstash.qstash_url,
+        qstashTokenEnvVar: env.upstash.qstash_token_env_var,
+        qstashCurrentSigningKeyEnvVar: env.upstash.qstash_current_signing_key_env_var,
+        qstashNextSigningKeyEnvVar: env.upstash.qstash_next_signing_key_env_var,
+      };
+    case "cloudflare_r2":
+      if (!env.cloudflare_r2) return null;
+      if (!env.cloudflare_r2.account_id?.trim()) {
+        throw new OfflocalError("Invalid cloudflare_r2 account_id in config; expected a non-empty account id.");
+      }
+      return {
+        provider,
+        accountId: env.cloudflare_r2.account_id,
+        bucketName: env.cloudflare_r2.bucket_name,
+        apiHost: env.cloudflare_r2.api_host,
+        jurisdiction: env.cloudflare_r2.jurisdiction,
+        accessKeyIdEnvVar: env.cloudflare_r2.access_key_id_env_var,
+        secretAccessKeyEnvVar: env.cloudflare_r2.secret_access_key_env_var,
+        publicUrl: env.cloudflare_r2.public_url,
+      };
+    case "sentry":
+      if (!env.sentry) return null;
+      if (!env.sentry.organization_slug?.trim()) {
+        throw new OfflocalError("Invalid sentry organization_slug in config; expected a non-empty organization slug.");
+      }
+      return {
+        provider,
+        organizationSlug: env.sentry.organization_slug,
+        projectSlug: env.sentry.project_slug,
+        teamSlug: env.sentry.team_slug,
+      };
+    case "posthog":
+      if (!env.posthog) return null;
+      if (!env.posthog.organization_id?.trim()) {
+        throw new OfflocalError("Invalid posthog organization_id in config; expected a non-empty organization id.");
+      }
+      return {
+        provider,
+        organizationId: env.posthog.organization_id,
+        projectId: env.posthog.project_id,
+        apiHost: env.posthog.api_host,
+        ingestHost: env.posthog.ingest_host,
+      };
+    case "twilio":
+      if (!env.twilio) return null;
+      if (!env.twilio.account_sid?.trim()) {
+        throw new OfflocalError("Invalid twilio account_sid in config; expected a non-empty account SID.");
+      }
+      return {
+        provider,
+        accountSid: env.twilio.account_sid,
+        fromNumber: env.twilio.from_number,
+        messagingServiceSid: env.twilio.messaging_service_sid,
+      };
+    case "resend":
+      if (!env.resend) return null;
+      if (!env.resend.domain?.trim()) {
+        throw new OfflocalError("Invalid resend domain in config; expected a non-empty domain.");
+      }
+      return {
+        provider,
+        domain: env.resend.domain,
+        defaultFrom: env.resend.default_from,
+      };
+    case "clerk":
+      if (!env.clerk) return null;
+      if (!env.clerk.publishable_key?.trim()) {
+        throw new OfflocalError("Invalid clerk publishable_key in config; expected a non-empty publishable key.");
+      }
+      return {
+        provider,
+        publishableKey: env.clerk.publishable_key,
+        apiHost: env.clerk.api_host,
+        frontendApiUrl: env.clerk.frontend_api_url,
+        signInUrl: env.clerk.sign_in_url,
+        signUpUrl: env.clerk.sign_up_url,
+        signInFallbackRedirectUrl: env.clerk.sign_in_fallback_redirect_url,
+        signUpFallbackRedirectUrl: env.clerk.sign_up_fallback_redirect_url,
+      };
     // No config blocks for these yet; their provider phases add them.
     case "namecheap":
     case "neon":
@@ -331,6 +534,20 @@ function environmentConnectionId(provider: ProviderId, env: ConfigEnvironment): 
       return env.stripe?.connection_id;
     case "railway":
       return env.railway?.connection_id;
+    case "upstash":
+      return env.upstash?.connection_id;
+    case "cloudflare_r2":
+      return env.cloudflare_r2?.connection_id;
+    case "sentry":
+      return env.sentry?.connection_id;
+    case "posthog":
+      return env.posthog?.connection_id;
+    case "resend":
+      return env.resend?.connection_id;
+    case "twilio":
+      return env.twilio?.connection_id;
+    case "clerk":
+      return env.clerk?.connection_id;
     case "namecheap":
     case "neon":
       return undefined;
@@ -346,7 +563,7 @@ export interface SeedResult {
 export function applyConfig(store: Store, config: OfflocalConfig): SeedResult {
   validateConfig(config);
   const result: SeedResult = { createdProjects: [], skippedProjects: [], createdRules: 0 };
-  const providers: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
+  const providers: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway", "upstash", "cloudflare_r2", "sentry", "posthog", "resend", "twilio", "clerk"];
 
   for (const [slug, p] of Object.entries(config.projects ?? {})) {
     if (store.data.projects.some((x) => x.slug === slug)) {
