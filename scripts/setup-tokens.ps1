@@ -2,10 +2,11 @@
 #
 #   powershell -File scripts/setup-tokens.ps1
 #
-# Stores each token as a USER environment variable — set once, available in
+# Stores each token as a USER environment variable - set once, available in
 # every project and every agent session on this machine. Press Enter to skip
 # anything you don't use; blank input never overwrites an existing value.
 # Re-run any time to add or rotate tokens.
+# (ASCII-only on purpose: Windows PowerShell 5.1 misreads UTF-8 without BOM.)
 
 $vars = [ordered]@{
   GITHUB_TOKEN           = "GitHub fine-grained PAT  (github.com -> Settings -> Developer settings -> Tokens)"
@@ -25,14 +26,14 @@ $vars = [ordered]@{
 }
 
 Write-Host ""
-Write-Host "offlocal token setup — Enter a value to save it, or just press Enter to skip." -ForegroundColor Cyan
+Write-Host "offlocal token setup - enter a value to save it, or just press Enter to skip." -ForegroundColor Cyan
 Write-Host "Values are saved as USER environment variables on this machine only."
 Write-Host ""
 
 foreach ($name in $vars.Keys) {
   $current = [Environment]::GetEnvironmentVariable($name, "User")
   if (-not $current) { $current = [Environment]::GetEnvironmentVariable($name, "Machine") }
-  $status = if ($current) { "already set — Enter keeps it" } else { "not set" }
+  $status = if ($current) { "already set - Enter keeps it" } else { "not set" }
   Write-Host ("{0}  [{1}]" -f $name, $status) -ForegroundColor Yellow
   Write-Host ("  {0}" -f $vars[$name]) -ForegroundColor DarkGray
   $value = Read-Host "  value"
@@ -44,4 +45,4 @@ foreach ($name in $vars.Keys) {
 }
 
 Write-Host "Done. Close this terminal AND restart Claude Code (new processes only see new values)." -ForegroundColor Cyan
-Write-Host "Then, in any project, ask your agent: `"run the offlocal doctor`" to confirm what's configured."
+Write-Host "Then, in any project, ask your agent: 'run the offlocal doctor' to confirm what's configured."
