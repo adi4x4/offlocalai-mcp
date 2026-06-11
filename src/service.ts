@@ -362,7 +362,7 @@ export function mapProviderResource(
         `Connection "${connectionId}" is for ${connection.provider}, not ${input.provider}.`,
       );
     }
-  } else {
+  } else if (input.provider !== "stripe") {
     connectionId = ensureConnection(store, input.provider);
   }
   const id = newId("map");
@@ -728,8 +728,79 @@ function envVarCheckId(provider: ProviderId): string {
   return `env.${provider}`;
 }
 
+function envVarSuffix(envVar: string): string {
+  return envVar.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "credential";
+}
+
+function hasEnvVar(envVar: string): boolean {
+  return typeof process.env[envVar] === "string" && process.env[envVar]!.trim().length > 0;
+}
+
+function stripeCredentialEnvVar(resource?: ProviderResource): string {
+  if (resource?.provider === "stripe" && resource.mode === "live") return "STRIPE_LIVE_SECRET_KEY";
+  return "STRIPE_TEST_SECRET_KEY";
+}
+
+function credentialEnvVars(
+  provider: ProviderId,
+  resource?: ProviderResource,
+  connection?: ProviderConnection,
+): string[] {
+  const envVars = [connection?.auth.envVar ?? (provider === "stripe" ? stripeCredentialEnvVar(resource) : defaultEnvVar(provider))];
+
+  if (provider === "upstash") {
+    envVars.push("UPSTASH_EMAIL");
+    if (resource?.provider === "upstash") envVars.push(resource.qstashTokenEnvVar ?? "QSTASH_TOKEN");
+  }
+
+  if (provider === "cloudflare_r2" && resource?.provider === "cloudflare_r2") {
+    envVars.push(resource.accessKeyIdEnvVar ?? "R2_ACCESS_KEY_ID", resource.secretAccessKeyEnvVar ?? "R2_SECRET_ACCESS_KEY");
+  }
+
+  if (provider === "namecheap") {
+    envVars.push("NAMECHEAP_API_USER", "NAMECHEAP_CLIENT_IP");
+  }
+
+  return Array.from(new Set(envVars));
+}
+
+function globalCredentialEnvVars(provider: ProviderId): string[] {
+  const envVars = credentialEnvVars(provider);
+
+  if (provider === "stripe") {
+    envVars.push("STRIPE_LIVE_SECRET_KEY");
+  }
+
+  if (provider === "upstash") {
+    envVars.push("QSTASH_TOKEN", "QSTASH_CURRENT_SIGNING_KEY", "QSTASH_NEXT_SIGNING_KEY");
+  }
+
+  if (provider === "cloudflare_r2") {
+    envVars.push("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY");
+  }
+
+  return Array.from(new Set(envVars));
+}
+
+function addCredentialChecks(
+  checks: DoctorCheck[],
+  provider: ProviderId,
+  envVars: string[],
+  idFor: (envVar: string, index: number) => string,
+): void {
+  envVars.forEach((envVar, index) => {
+    const present = hasEnvVar(envVar);
+    checks.push({
+      id: idFor(envVar, index),
+      status: present ? "pass" : "warn",
+      message: present ? `${envVar} is set for ${provider}.` : `${envVar} is not set for ${provider}.`,
+    });
+  });
+}
+
 function connectionForMapping(store: Store, provider: ProviderId, connectionId?: string): ProviderConnection | undefined {
   if (connectionId) return store.data.connections.find((c) => c.id === connectionId && c.provider === provider);
+  if (provider === "stripe") return undefined;
   return store.data.connections.find((c) => c.provider === provider);
 }
 
@@ -746,7 +817,13 @@ export function doctor(store: Store, input: { project?: string; environment?: st
     project = resolveProject(store, input.project);
     checks.push({ id: "project", status: "pass", message: `Project ${project.slug} resolved.` });
   } catch (err) {
-    checks.push({ id: "project", status: "fail", message: err instanceof Error ? err.message : String(err) });
+    const message = err instanceof Error ? err.message : String(err);
+    const noProjectSelected = input.project === undefined && message.includes("No project specified");
+    checks.push({
+      id: "project",
+      status: noProjectSelected ? "warn" : "fail",
+      message: noProjectSelected ? `${message} Reporting provider credential checks only.` : message,
+    });
   }
 
   let environments: Environment[] = [];
@@ -768,7 +845,6 @@ export function doctor(store: Store, input: { project?: string; environment?: st
     }
   }
 
-  const seenProviders = new Set<ProviderId>();
   for (const env of environments) {
     const mappings = store.data.mappings.filter((mapping) => mapping.environmentId === env.id);
     checks.push({
@@ -788,28 +864,36 @@ export function doctor(store: Store, input: { project?: string; environment?: st
         message: `${provider} mapping configured for ${env.name}.`,
         details: { connectionId: mapping.connectionId, resource: mapping.resource },
       });
-      seenProviders.add(provider);
       const connection = connectionForMapping(store, provider, mapping.connectionId);
-      const envVar = connection?.auth.envVar ?? defaultEnvVar(provider);
-      const present = typeof process.env[envVar] === "string" && process.env[envVar]!.trim().length > 0;
-      checks.push({
-        id: envVarCheckId(provider),
-        status: present ? "pass" : "warn",
-        message: present ? `${envVar} is set for ${provider}.` : `${envVar} is not set for ${provider}.`,
-      });
+      addCredentialChecks(checks, provider, credentialEnvVars(provider, mapping.resource, connection), (envVar, index) =>
+        index === 0 ? envVarCheckId(provider) : `${envVarCheckId(provider)}.${envVarSuffix(envVar)}`,
+      );
     }
   }
 
-  for (const provider of store.data.connections.map((connection) => connection.provider)) {
-    if (!seenProviders.has(provider)) {
-      const connection = store.data.connections.find((c) => c.provider === provider)!;
-      const present = typeof process.env[connection.auth.envVar] === "string" && process.env[connection.auth.envVar]!.trim().length > 0;
-      checks.push({
-        id: envVarCheckId(provider),
-        status: present ? "pass" : "warn",
-        message: present ? `${connection.auth.envVar} is set for ${provider}.` : `${connection.auth.envVar} is not set for ${provider}.`,
-      });
+  if (environments.length === 0) {
+    checks.push({
+      id: "credentials.global",
+      status: "pass",
+      message: "Checking provider credential environment variables without project mappings.",
+    });
+    for (const provider of PROVIDER_IDS) {
+      addCredentialChecks(checks, provider, globalCredentialEnvVars(provider), (envVar, index) =>
+        index === 0 ? envVarCheckId(provider) : `${envVarCheckId(provider)}.${envVarSuffix(envVar)}`,
+      );
     }
+  }
+
+  for (const connection of listConnections(store)) {
+    checks.push({
+      id: `connection.${connection.id}`,
+      status: "pass",
+      message: `${connection.provider} connection "${connection.label}" uses ${connection.auth.envVar}.`,
+      details: { provider: connection.provider, label: connection.label, envVar: connection.auth.envVar },
+    });
+    addCredentialChecks(checks, connection.provider, credentialEnvVars(connection.provider, undefined, connection), (envVar, index) =>
+      index === 0 ? `env.connection.${connection.id}` : `env.connection.${connection.id}.${envVarSuffix(envVar)}`,
+    );
   }
 
   try {

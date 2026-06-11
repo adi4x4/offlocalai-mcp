@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync } from "node:fs";
 import { freshStore, seedAcme } from "./helpers.js";
+import { applyConfig } from "../src/config.js";
 import {
   createConnection,
   dashclawRecentDecisions,
@@ -16,6 +17,24 @@ import {
 } from "../src/service.js";
 
 describe("operational readiness", () => {
+  afterEach(() => {
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.VERCEL_TOKEN;
+    delete process.env.CUSTOM_SENTRY_A_TOKEN;
+    delete process.env.CUSTOM_SENTRY_B_TOKEN;
+    delete process.env.STRIPE_TEST_SECRET_KEY;
+    delete process.env.STRIPE_LIVE_SECRET_KEY;
+    delete process.env.UPSTASH_EMAIL;
+    delete process.env.UPSTASH_API_KEY;
+    delete process.env.CLOUDFLARE_API_TOKEN;
+    delete process.env.R2_ACCESS_KEY_ID;
+    delete process.env.R2_SECRET_ACCESS_KEY;
+    delete process.env.SENTRY_AUTH_TOKEN;
+    delete process.env.NAMECHEAP_API_KEY;
+    delete process.env.NAMECHEAP_API_USER;
+    delete process.env.NAMECHEAP_CLIENT_IP;
+  });
+
   it("creates and lists explicit provider connections without storing secrets", () => {
     const store = freshStore();
 
@@ -87,6 +106,87 @@ describe("operational readiness", () => {
         expect.objectContaining({ id: "env.github", status: "warn" }),
         expect.objectContaining({ id: "env.vercel", status: "pass" }),
         expect.objectContaining({ id: "audit.writable", status: "fail" }),
+      ]),
+    );
+  });
+
+  it("reports global provider credential checks when no project is selected", () => {
+    const store = freshStore();
+    process.env.GITHUB_TOKEN = "gh_dummy";
+    delete process.env.VERCEL_TOKEN;
+    delete process.env.STRIPE_LIVE_SECRET_KEY;
+    delete process.env.QSTASH_TOKEN;
+    delete process.env.R2_SECRET_ACCESS_KEY;
+    delete process.env.NAMECHEAP_CLIENT_IP;
+
+    const report = doctor(store);
+
+    expect(report.status).toBe("warn");
+    expect(report.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "project", status: "warn" }),
+        expect.objectContaining({ id: "env.github", status: "pass", message: expect.stringContaining("GITHUB_TOKEN") }),
+        expect.objectContaining({ id: "env.vercel", status: "warn", message: expect.stringContaining("VERCEL_TOKEN") }),
+        expect.objectContaining({ id: "env.stripe.stripe_live_secret_key", status: "warn", message: expect.stringContaining("STRIPE_LIVE_SECRET_KEY") }),
+        expect.objectContaining({ id: "env.upstash.qstash_token", status: "warn", message: expect.stringContaining("QSTASH_TOKEN") }),
+        expect.objectContaining({ id: "env.cloudflare_r2.r2_secret_access_key", status: "warn", message: expect.stringContaining("R2_SECRET_ACCESS_KEY") }),
+        expect.objectContaining({ id: "env.namecheap.namecheap_client_ip", status: "warn", message: expect.stringContaining("NAMECHEAP_CLIENT_IP") }),
+        expect.objectContaining({ id: "env.sentry", status: "warn", message: expect.stringContaining("SENTRY_AUTH_TOKEN") }),
+      ]),
+    );
+  });
+
+  it("reports mapped provider-specific credential env vars", () => {
+    const store = freshStore();
+    applyConfig(store, {
+      projects: {
+        "launch-app": {
+          environments: {
+            production: {
+              kind: "production",
+              stripe: { mode: "live" },
+              upstash: { database_id: "redis-prod" },
+              cloudflare_r2: { account_id: "cf_account", bucket_name: "assets" },
+            },
+          },
+        },
+      },
+    });
+    delete process.env.STRIPE_TEST_SECRET_KEY;
+    process.env.STRIPE_LIVE_SECRET_KEY = "sk_live_dummy";
+    process.env.UPSTASH_API_KEY = "upstash_dummy";
+    delete process.env.UPSTASH_EMAIL;
+    process.env.CLOUDFLARE_API_TOKEN = "cf_dummy";
+    process.env.R2_ACCESS_KEY_ID = "r2_access";
+    delete process.env.R2_SECRET_ACCESS_KEY;
+
+    const report = doctor(store, { project: "launch-app", environment: "production" });
+
+    expect(report.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "env.stripe", status: "pass", message: expect.stringContaining("STRIPE_LIVE_SECRET_KEY") }),
+        expect.objectContaining({ id: "env.upstash", status: "pass", message: expect.stringContaining("UPSTASH_API_KEY") }),
+        expect.objectContaining({ id: "env.upstash.upstash_email", status: "warn", message: expect.stringContaining("UPSTASH_EMAIL") }),
+        expect.objectContaining({ id: "env.cloudflare_r2", status: "pass", message: expect.stringContaining("CLOUDFLARE_API_TOKEN") }),
+        expect.objectContaining({ id: "env.cloudflare_r2.r2_secret_access_key", status: "warn", message: expect.stringContaining("R2_SECRET_ACCESS_KEY") }),
+      ]),
+    );
+  });
+
+  it("reports every explicit provider connection independently", () => {
+    const store = freshStore();
+    const first = createConnection(store, { provider: "sentry", label: "org-a", envVar: "CUSTOM_SENTRY_A_TOKEN" });
+    const second = createConnection(store, { provider: "sentry", label: "org-b", envVar: "CUSTOM_SENTRY_B_TOKEN" });
+    process.env.CUSTOM_SENTRY_B_TOKEN = "sntrys_dummy";
+
+    const report = doctor(store);
+
+    expect(report.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: `connection.${first.id}`, status: "pass" }),
+        expect.objectContaining({ id: `connection.${second.id}`, status: "pass" }),
+        expect.objectContaining({ id: `env.connection.${first.id}`, status: "warn", message: expect.stringContaining("CUSTOM_SENTRY_A_TOKEN") }),
+        expect.objectContaining({ id: `env.connection.${second.id}`, status: "pass", message: expect.stringContaining("CUSTOM_SENTRY_B_TOKEN") }),
       ]),
     );
   });

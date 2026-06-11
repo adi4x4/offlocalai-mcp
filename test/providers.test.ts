@@ -1635,6 +1635,22 @@ describe("Stripe", () => {
     expect(lastAudit(store)).toMatchObject({ result: "success", policyDecision: "allow", provider: "stripe" });
   });
 
+  it("uses the live Stripe key for production reads when no explicit connection is mapped", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    fetchMock.mockResolvedValueOnce(mockOk({ data: [{ id: "prod_live", name: "Live", active: true, created: 1 }] }));
+
+    const res = await pa.stripeListProducts(store, { environment: "production", limit: 1 });
+
+    expect(res.status).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.stripe.com/v1/products?limit=1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk_live_dummy" }),
+      }),
+    );
+  });
+
   it("requires approval for live-mode writes and does NOT execute them", async () => {
     setDashclawDecision("require_approval", "stripe_live");
     const store = freshStore();
