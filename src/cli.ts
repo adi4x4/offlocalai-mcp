@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { Store } from "./storage.js";
 import {
+  addConnection,
   addEnvironment,
   createProject,
   ensureDefaultWorkspace,
   getProjectContext,
+  listConnections,
   listEnvironments,
   listProjects,
   mapProviderResource,
@@ -116,10 +118,17 @@ Usage:
   offlocal select <project>                Set the active project
   offlocal env add <name> [--project <p>] [--kind development|staging|production]
   offlocal env list [--project <p>]
-  offlocal map <provider> <environment> --resource '<json>' [--project <p>]
+  offlocal connect <provider> --label <name> [--env-var <VAR>] [--vercel-team-id <id>]
+  offlocal connections                     List configured provider accounts
+  offlocal map <provider> <environment> --resource '<json>' [--project <p>] [--connection <label>]
   offlocal context [project] [--env <e>] [--json]   Print the production-context summary
 
 Providers: github | vercel | supabase | stripe | railway
+
+Multiple accounts of one provider:
+  offlocal connect vercel --label client-a --env-var VERCEL_TOKEN_CLIENT_A
+  offlocal map vercel staging --resource '{"projectId":"..."}' --connection client-a
+(then set VERCEL_TOKEN_CLIENT_A in your MCP client config).
 Resource JSON examples:
   github:   {"owner":"your-org","repo":"your-repo"}
   vercel:   {"projectId":"your-vercel-project"}
@@ -213,8 +222,37 @@ async function main(): Promise<void> {
         return print({ status: "error", error: "--resource must be valid JSON" });
       }
       const resource = { provider, ...parsed } as ProviderResource;
-      const res = mapProviderResource(store, { project: flags.project, environment, provider, resource });
+      const res = mapProviderResource(store, {
+        project: flags.project,
+        environment,
+        provider,
+        resource,
+        connection: flags.connection,
+      });
       print({ status: "ok", project: res.project.slug, environment: res.environment.name, mappingId: res.mappingId });
+      return;
+    }
+
+    case "connect": {
+      const provider = sub as ProviderId;
+      if (!provider || !flags.label) {
+        return print({
+          status: "error",
+          error: "Usage: offlocal connect <provider> --label <name> [--env-var <VAR>] [--vercel-team-id <id>]",
+        });
+      }
+      const connection = addConnection(store, {
+        provider,
+        label: flags.label,
+        envVar: flags["env-var"],
+        vercelTeamId: flags["vercel-team-id"],
+      });
+      print({ status: "ok", connection });
+      return;
+    }
+
+    case "connections": {
+      print({ status: "ok", connections: listConnections(store) });
       return;
     }
 

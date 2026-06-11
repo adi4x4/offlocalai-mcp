@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { freshStore, seedAcme } from "./helpers.js";
 import * as pa from "../src/provider-actions.js";
-import { listAuditLog, mapProviderResource } from "../src/service.js";
+import {
+  listAuditLog,
+  mapProviderResource,
+  addConnection,
+  listConnections,
+  createProject,
+  addEnvironment,
+} from "../src/service.js";
 import type { Store } from "../src/storage.js";
 
 /**
@@ -350,6 +357,65 @@ describe("Railway writes", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const body = JSON.parse((fetchMock.mock.calls[0]![1] as RequestInit).body as string);
     expect(body.variables.input).toMatchObject({ name: "FEATURE_FLAG", value: "on", environmentId: "rw_env_1" });
+  });
+});
+
+describe("Multi-account connections", () => {
+  it("routes each project to its own provider token via named connections", async () => {
+    const store = freshStore();
+    createProject(store, { name: "Client A", slug: "client-a" });
+    addEnvironment(store, { project: "client-a", name: "staging" });
+    createProject(store, { name: "Client B", slug: "client-b" });
+    addEnvironment(store, { project: "client-b", name: "staging" });
+
+    addConnection(store, { provider: "vercel", label: "acct-a", envVar: "VC_A" });
+    addConnection(store, { provider: "vercel", label: "acct-b", envVar: "VC_B" });
+    mapProviderResource(store, {
+      project: "client-a",
+      environment: "staging",
+      provider: "vercel",
+      resource: { provider: "vercel", projectId: "a-proj" },
+      connection: "acct-a",
+    });
+    mapProviderResource(store, {
+      project: "client-b",
+      environment: "staging",
+      provider: "vercel",
+      resource: { provider: "vercel", projectId: "b-proj" },
+      connection: "acct-b",
+    });
+
+    process.env.VC_A = "tokenA";
+    process.env.VC_B = "tokenB";
+    fetchMock.mockImplementation(async () => mockOk({ deployments: [] }));
+
+    await pa.vercelDeployments(store, { project: "client-a", environment: "staging" });
+    await pa.vercelDeployments(store, { project: "client-b", environment: "staging" });
+
+    const h0 = (fetchMock.mock.calls[0]![1] as RequestInit).headers as Record<string, string>;
+    const h1 = (fetchMock.mock.calls[1]![1] as RequestInit).headers as Record<string, string>;
+    expect(h0.Authorization).toBe("Bearer tokenA");
+    expect(h1.Authorization).toBe("Bearer tokenB");
+  });
+
+  it("rejects a duplicate connection label for the same provider", () => {
+    const store = freshStore();
+    addConnection(store, { provider: "vercel", label: "acct-a", envVar: "VC_A" });
+    expect(() => addConnection(store, { provider: "vercel", label: "acct-a", envVar: "VC_X" })).toThrow(/already exists/);
+  });
+
+  it("list_provider_connections reports token presence without exposing values", () => {
+    const store = freshStore();
+    addConnection(store, { provider: "vercel", label: "acct-a", envVar: "VC_PRESENT" });
+    addConnection(store, { provider: "railway", label: "rw-a", envVar: "VC_ABSENT" });
+    process.env.VC_PRESENT = "secret-value";
+    delete process.env.VC_ABSENT;
+
+    const conns = listConnections(store);
+    const a = conns.find((c) => c.label === "acct-a")!;
+    expect(a).toMatchObject({ provider: "vercel", envVar: "VC_PRESENT", tokenPresent: true });
+    expect(JSON.stringify(conns)).not.toContain("secret-value");
+    expect(conns.find((c) => c.label === "rw-a")!.tokenPresent).toBe(false);
   });
 });
 

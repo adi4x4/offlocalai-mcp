@@ -23,6 +23,24 @@ describe("config seeding", () => {
     expect(existsSync(store.paths.state)).toBe(true);
   });
 
+  it("seeds named connections and binds a mapping to one", () => {
+    const store = freshStore();
+    applyConfig(store, {
+      connections: [{ provider: "vercel", label: "client-a", env_var: "VERCEL_TOKEN_CLIENT_A" }],
+      projects: {
+        "acme-a": {
+          environments: {
+            production: { kind: "production", vercel: { project: "a-prod", connection: "client-a" } },
+          },
+        },
+      },
+    });
+    const conn = store.data.connections.find((c) => c.label === "client-a")!;
+    expect(conn.auth.envVar).toBe("VERCEL_TOKEN_CLIENT_A");
+    const mapping = listProviderMappings(store, "acme-a").find((m) => m.provider === "vercel")!;
+    expect(mapping.connection).toBe("client-a");
+  });
+
   it("is idempotent — re-applying skips existing projects", () => {
     const store = freshStore();
     applyConfig(store, acmeConfig());

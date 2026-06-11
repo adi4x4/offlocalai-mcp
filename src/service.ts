@@ -1,7 +1,7 @@
 import type { Store } from "./storage.js";
 import { buildProjectContext, type ProjectContext } from "./context.js";
 import { evaluatePolicy } from "./policy.js";
-import { resolveEnvironment, resolveProject, requireMapping } from "./resolve.js";
+import { resolveEnvironment, resolveProject, requireMapping, resolveConnection } from "./resolve.js";
 import { defaultEnvVar } from "./providers/auth.js";
 import type {
   ActionContext,
@@ -11,6 +11,7 @@ import type {
   PolicyEffect,
   PolicyRule,
   Project,
+  ProviderConnection,
   ProviderId,
   ProviderResource,
   Workspace,
@@ -149,7 +150,12 @@ export function ensureConnection(
   provider: ProviderId,
   opts?: { label?: string; envVar?: string; vercelTeamId?: string },
 ): string {
-  const existing = store.data.connections.find((c) => c.provider === provider);
+  // Match on the env var, not just the provider, so a named connection with a
+  // custom env var never shadows (or is shadowed by) the default connection.
+  const envVar = opts?.envVar ?? defaultEnvVar(provider);
+  const existing = store.data.connections.find(
+    (c) => c.provider === provider && c.auth.envVar === envVar,
+  );
   if (existing) return existing.id;
   const ws = ensureDefaultWorkspace(store);
   const id = newId("conn");
@@ -159,12 +165,58 @@ export function ensureConnection(
       workspaceId: ws.id,
       provider,
       label: opts?.label ?? `${provider}-default`,
-      auth: { kind: "env", envVar: opts?.envVar ?? defaultEnvVar(provider) },
+      auth: { kind: "env", envVar },
       scope: opts?.vercelTeamId ? { vercelTeamId: opts.vercelTeamId } : undefined,
       createdAt: nowIso(),
     });
   });
   return id;
+}
+
+/**
+ * Register a NEW named connection for a provider — the building block of
+ * multi-account orchestration. Each connection points at its own env var (e.g.
+ * VERCEL_TOKEN_CLIENT_A), so different projects/environments can map to
+ * different accounts of the same provider. Tokens are never persisted.
+ */
+export function addConnection(
+  store: Store,
+  input: { provider: ProviderId; label: string; envVar?: string; vercelTeamId?: string },
+): ProviderConnection {
+  const label = input.label.trim();
+  if (!label) throw new OfflocalError("Connection label cannot be empty.");
+  if (store.data.connections.some((c) => c.provider === input.provider && c.label === label)) {
+    throw new OfflocalError(
+      `A ${input.provider} connection labelled "${label}" already exists.`,
+    );
+  }
+  const ws = ensureDefaultWorkspace(store);
+  const connection: ProviderConnection = {
+    id: newId("conn"),
+    workspaceId: ws.id,
+    provider: input.provider,
+    label,
+    auth: { kind: "env", envVar: input.envVar ?? defaultEnvVar(input.provider) },
+    scope: input.vercelTeamId ? { vercelTeamId: input.vercelTeamId } : undefined,
+    createdAt: nowIso(),
+  };
+  store.update((s) => {
+    s.connections.push(connection);
+  });
+  return connection;
+}
+
+/** List configured connections (never exposes token values). */
+export function listConnections(store: Store) {
+  return store.data.connections.map((c) => ({
+    id: c.id,
+    provider: c.provider,
+    label: c.label,
+    envVar: c.auth.envVar,
+    vercelTeamId: c.scope?.vercelTeamId,
+    /** Whether the connection's env var is currently set (value never shown). */
+    tokenPresent: !!process.env[c.auth.envVar]?.trim(),
+  }));
 }
 
 export function mapProviderResource(
@@ -175,6 +227,8 @@ export function mapProviderResource(
     provider: ProviderId;
     resource: ProviderResource;
     connectionId?: string;
+    /** Bind this mapping to a named connection (id or label) for multi-account. */
+    connection?: string;
   },
 ): { project: Project; environment: Environment; mappingId: string } {
   const project = resolveProject(store, input.project);
@@ -184,7 +238,9 @@ export function mapProviderResource(
       `Resource provider "${input.resource.provider}" does not match "${input.provider}".`,
     );
   }
-  const connectionId = input.connectionId ?? ensureConnection(store, input.provider);
+  const connectionId = input.connection
+    ? resolveConnection(store, input.provider, input.connection).id
+    : input.connectionId ?? ensureConnection(store, input.provider);
   const id = newId("map");
   store.update((s) => {
     // Replace any existing mapping for this env+provider (one resource per pair).
@@ -208,6 +264,8 @@ export function listProviderMappings(store: Store, projectRef?: string) {
   const project = resolveProject(store, projectRef);
   const envName = (id: string) =>
     store.data.environments.find((e) => e.id === id)?.name ?? id;
+  const connLabel = (id?: string) =>
+    id ? store.data.connections.find((c) => c.id === id)?.label : undefined;
   return store.data.mappings
     .filter((m) => m.projectId === project.id)
     .map((m) => ({
@@ -215,6 +273,7 @@ export function listProviderMappings(store: Store, projectRef?: string) {
       environment: envName(m.environmentId),
       provider: m.provider,
       resource: m.resource,
+      connection: connLabel(m.connectionId),
     }));
 }
 

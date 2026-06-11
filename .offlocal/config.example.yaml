@@ -47,6 +47,14 @@ projects:
 # entries apply everywhere. These mirror the built-in safe defaults; edit to suit.
 #   tokens: <provider>.<capability>  |  provider.<capability> (wildcard provider)
 #   capabilities: read | write | deploy | env.write | destructive_sql | delete
+# Optional: named accounts for multi-account setups. Each reads its own env var.
+# Reference one from a provider mapping above with `connection: <label>`, e.g.
+#   vercel: { project: a-prod, connection: client-a }
+# Omit this whole block if you use a single account per provider.
+connections:
+  - { provider: vercel, label: client-a, env_var: VERCEL_TOKEN_CLIENT_A }
+  - { provider: railway, label: client-a, env_var: RAILWAY_TOKEN_CLIENT_A }
+
 policy:
   require_approval:
     - vercel.deploy

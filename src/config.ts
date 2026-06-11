@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import type { Store } from "./storage.js";
 import {
+  addConnection,
   addEnvironment,
   createProject,
   mapProviderResource,
@@ -33,11 +34,18 @@ import type { Capability, EnvironmentKind, PolicyRule, ProviderId, ProviderResou
 
 interface ConfigEnvironment {
   kind?: EnvironmentKind;
-  github?: { repo: string };
-  vercel?: { project: string; team_id?: string };
-  supabase?: { project_ref: string };
-  stripe?: { mode: "test" | "live" };
-  railway?: { project_id: string; environment_id?: string; service_id?: string };
+  github?: { repo: string; connection?: string };
+  vercel?: { project: string; team_id?: string; connection?: string };
+  supabase?: { project_ref: string; connection?: string };
+  stripe?: { mode: "test" | "live"; connection?: string };
+  railway?: { project_id: string; environment_id?: string; service_id?: string; connection?: string };
+}
+
+interface ConfigConnection {
+  provider: ProviderId;
+  label: string;
+  env_var?: string;
+  vercel_team_id?: string;
 }
 
 interface ConfigMemory {
@@ -55,6 +63,7 @@ interface ConfigProject {
 
 interface OfflocalConfig {
   projects?: Record<string, ConfigProject>;
+  connections?: ConfigConnection[];
   policy?: {
     require_approval?: string[];
     block?: string[];
@@ -125,6 +134,21 @@ export function applyConfig(store: Store, config: OfflocalConfig): SeedResult {
   const result: SeedResult = { createdProjects: [], skippedProjects: [], createdRules: 0 };
   const providers: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
 
+  // Named connections (multi-account) — create these first so mappings can bind
+  // to them by label. Skip a label that already exists for the provider.
+  for (const c of config.connections ?? []) {
+    const exists = store.data.connections.some(
+      (x) => x.provider === c.provider && x.label === c.label,
+    );
+    if (exists) continue;
+    addConnection(store, {
+      provider: c.provider,
+      label: c.label,
+      envVar: c.env_var,
+      vercelTeamId: c.vercel_team_id,
+    });
+  }
+
   for (const [slug, p] of Object.entries(config.projects ?? {})) {
     if (store.data.projects.some((x) => x.slug === slug)) {
       result.skippedProjects.push(slug);
@@ -138,7 +162,8 @@ export function applyConfig(store: Store, config: OfflocalConfig): SeedResult {
       for (const provider of providers) {
         const resource = environmentResource(provider, envCfg);
         if (!resource) continue;
-        mapProviderResource(store, { project: project.slug, environment: envName, provider, resource });
+        const connection = (envCfg[provider] as { connection?: string } | undefined)?.connection;
+        mapProviderResource(store, { project: project.slug, environment: envName, provider, resource, connection });
       }
     }
 

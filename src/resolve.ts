@@ -90,3 +90,31 @@ export function findConnection(
   }
   return store.data.connections.find((c) => c.provider === provider);
 }
+
+/**
+ * Resolve a connection by id or by label (scoped to the provider). Used when a
+ * mapping is bound to a specific named account, e.g. "vercel-client-a".
+ */
+export function resolveConnection(
+  store: Store,
+  provider: ProviderId,
+  ref: string,
+): ProviderConnection {
+  const forProvider = store.data.connections.filter((c) => c.provider === provider);
+  const found =
+    store.data.connections.find((c) => c.id === ref) ??
+    forProvider.find((c) => c.label === ref);
+  if (!found) {
+    throw new OfflocalError(
+      `No ${provider} connection matches "${ref}". ` +
+        `Known ${provider} connections: ${forProvider.map((c) => c.label).join(", ") || "(none)"}. ` +
+        `Add one with add_provider_connection.`,
+    );
+  }
+  if (found.provider !== provider) {
+    throw new OfflocalError(
+      `Connection "${ref}" is a ${found.provider} connection, not ${provider}.`,
+    );
+  }
+  return found;
+}

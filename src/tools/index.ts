@@ -141,7 +141,10 @@ export function registerTools(server: McpServer, store: Store): void {
       description:
         "Bind a provider resource to a project environment. Examples of `resource`: " +
         "{provider:'github',owner:'your-org',repo:'your-repo'}, {provider:'vercel',projectId:'your-vercel-project'}, " +
-        "{provider:'supabase',projectRef:'your_project_ref'}, {provider:'stripe',mode:'live'}.",
+        "{provider:'supabase',projectRef:'your_project_ref'}, {provider:'stripe',mode:'live'}, " +
+        "{provider:'railway',projectId:'...',environmentId:'...',serviceId:'...'}. " +
+        "Pass `connection` (a label/id from add_provider_connection) to use a specific account " +
+        "when you have more than one for this provider.",
       inputSchema: {
         project: z.string().optional(),
         environment: z.string().describe("Environment id or name"),
@@ -149,17 +152,59 @@ export function registerTools(server: McpServer, store: Store): void {
         resource: z
           .record(z.any())
           .describe("Resource object including a 'provider' field matching `provider`"),
+        connection: z
+          .string()
+          .optional()
+          .describe("Named connection (label or id) to use; defaults to the provider's default connection"),
       },
     },
-    guard((a: { project?: string; environment: string; provider: (typeof PROVIDER_IDS)[number]; resource: any }) => {
+    guard((a: { project?: string; environment: string; provider: (typeof PROVIDER_IDS)[number]; resource: any; connection?: string }) => {
       const res = svc.mapProviderResource(store, {
         project: a.project,
         environment: a.environment,
         provider: a.provider,
         resource: { provider: a.provider, ...a.resource },
+        connection: a.connection,
       });
       return { status: "ok", project: res.project.slug, environment: res.environment.name, mappingId: res.mappingId };
     }),
+  );
+
+  server.registerTool(
+    "add_provider_connection",
+    {
+      title: "Add provider connection",
+      description:
+        "Register a named provider account that reads its token from its own environment variable — " +
+        "the basis for multi-account orchestration. Set the env var in your MCP client config, then " +
+        "bind environments to this connection via map_provider_resource's `connection` arg. Example: " +
+        "{provider:'vercel', label:'client-a', envVar:'VERCEL_TOKEN_CLIENT_A'}. Tokens are never persisted.",
+      inputSchema: {
+        provider,
+        label: z.string().describe("Friendly unique name for this account, e.g. 'client-a'"),
+        envVar: z
+          .string()
+          .optional()
+          .describe("Env var holding this account's token (defaults to the provider's standard var)"),
+        vercelTeamId: z.string().optional().describe("Vercel only: default team id for this account"),
+      },
+    },
+    guard((a: { provider: (typeof PROVIDER_IDS)[number]; label: string; envVar?: string; vercelTeamId?: string }) => ({
+      status: "ok",
+      connection: svc.addConnection(store, a),
+    })),
+  );
+
+  server.registerTool(
+    "list_provider_connections",
+    {
+      title: "List provider connections",
+      description:
+        "List configured provider connections (accounts) and whether each one's env var is currently " +
+        "set. Token values are never shown.",
+      inputSchema: {},
+    },
+    guard(() => ({ status: "ok", connections: svc.listConnections(store) })),
   );
 
   server.registerTool(

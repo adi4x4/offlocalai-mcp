@@ -39,8 +39,14 @@ function resolve(store: Store, input: Base): { project: Project; environment: En
   return { project, environment };
 }
 
-function tokenFor(store: Store, provider: ProviderId): string {
-  const conn = findConnection(store, provider);
+/**
+ * Resolve the provider token for a call. When `connectionId` is given (from the
+ * mapping the action is operating on), the token is read from THAT connection's
+ * env var — this is what lets two projects use two different accounts of the
+ * same provider. Falls back to the provider's default connection / env var.
+ */
+function tokenFor(store: Store, provider: ProviderId, connectionId?: string): string {
+  const conn = findConnection(store, provider, connectionId);
   if (conn) return resolveToken(conn);
   const envVar = defaultEnvVar(provider);
   const v = process.env[envVar];
@@ -52,9 +58,15 @@ function tokenFor(store: Store, provider: ProviderId): string {
   return v.trim();
 }
 
-function vercelTeamId(store: Store, mappingTeamId?: string): string | undefined {
+function vercelTeamId(
+  store: Store,
+  mappingTeamId?: string,
+  connectionId?: string,
+): string | undefined {
   if (mappingTeamId) return mappingTeamId;
-  const conn = store.data.connections.find((c) => c.provider === "vercel");
+  const conn = connectionId
+    ? store.data.connections.find((c) => c.id === connectionId)
+    : store.data.connections.find((c) => c.provider === "vercel");
   return conn?.scope?.vercelTeamId ?? process.env.VERCEL_TEAM_ID;
 }
 
@@ -82,7 +94,7 @@ export async function githubRepoContext(store: Store, input: Base): Promise<Guar
     ctx(project, environment, "github", "read", "get_github_repo_context", `repo ${label}`, {
       resourceLabel: label,
     }),
-    () => gh.getRepoContext(tokenFor(store, "github"), r.owner, r.repo),
+    () => gh.getRepoContext(tokenFor(store, "github", m.connectionId), r.owner, r.repo),
   );
 }
 
@@ -96,7 +108,7 @@ export async function githubReadme(store: Store, input: Base): Promise<GuardedRe
     ctx(project, environment, "github", "read", "get_github_repo_readme", `readme ${label}`, {
       resourceLabel: label,
     }),
-    () => gh.getReadme(tokenFor(store, "github"), r.owner, r.repo),
+    () => gh.getReadme(tokenFor(store, "github", m.connectionId), r.owner, r.repo),
   );
 }
 
@@ -113,7 +125,7 @@ export async function githubListFiles(
     ctx(project, environment, "github", "read", "list_github_repo_files", `files ${label}`, {
       resourceLabel: label,
     }),
-    () => gh.listFiles(tokenFor(store, "github"), r.owner, r.repo, input.path ?? ""),
+    () => gh.listFiles(tokenFor(store, "github", m.connectionId), r.owner, r.repo, input.path ?? ""),
   );
 }
 
@@ -121,18 +133,21 @@ export async function githubListFiles(
 
 function vercelResource(store: Store, project: Project, environment: Environment) {
   const m = requireMapping(store, project, environment, "vercel");
-  return m.resource as { projectId: string; projectName?: string; teamId?: string };
+  return {
+    r: m.resource as { projectId: string; projectName?: string; teamId?: string },
+    connectionId: m.connectionId,
+  };
 }
 
 export async function vercelProjectContext(store: Store, input: Base): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = vercelResource(store, project, environment);
+  const { r, connectionId } = vercelResource(store, project, environment);
   return runGuarded(
     store,
     ctx(project, environment, "vercel", "read", "get_vercel_project_context", `project ${r.projectId}`, {
       resourceLabel: r.projectId,
     }),
-    () => vc.getProjectContext(tokenFor(store, "vercel"), r.projectId, vercelTeamId(store, r.teamId)),
+    () => vc.getProjectContext(tokenFor(store, "vercel", connectionId), r.projectId, vercelTeamId(store, r.teamId, connectionId)),
   );
 }
 
@@ -141,14 +156,14 @@ export async function vercelDeployments(
   input: Base & { limit?: number },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = vercelResource(store, project, environment);
+  const { r, connectionId } = vercelResource(store, project, environment);
   return runGuarded(
     store,
     ctx(project, environment, "vercel", "read", "get_vercel_deployments", `deployments ${r.projectId}`, {
       resourceLabel: r.projectId,
     }),
     () =>
-      vc.listDeployments(tokenFor(store, "vercel"), r.projectId, vercelTeamId(store, r.teamId), input.limit ?? 10),
+      vc.listDeployments(tokenFor(store, "vercel", connectionId), r.projectId, vercelTeamId(store, r.teamId, connectionId), input.limit ?? 10),
   );
 }
 
@@ -157,13 +172,13 @@ export async function vercelDeploymentStatus(
   input: Base & { deploymentId: string },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = vercelResource(store, project, environment);
+  const { r, connectionId } = vercelResource(store, project, environment);
   return runGuarded(
     store,
     ctx(project, environment, "vercel", "read", "get_vercel_deployment_status", `status ${input.deploymentId}`, {
       resourceLabel: input.deploymentId,
     }),
-    () => vc.getDeploymentStatus(tokenFor(store, "vercel"), input.deploymentId, vercelTeamId(store, r.teamId)),
+    () => vc.getDeploymentStatus(tokenFor(store, "vercel", connectionId), input.deploymentId, vercelTeamId(store, r.teamId, connectionId)),
   );
 }
 
@@ -172,14 +187,14 @@ export async function vercelDeploymentLogs(
   input: Base & { deploymentId: string; limit?: number },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = vercelResource(store, project, environment);
+  const { r, connectionId } = vercelResource(store, project, environment);
   return runGuarded(
     store,
     ctx(project, environment, "vercel", "read", "get_vercel_deployment_logs", `logs ${input.deploymentId}`, {
       resourceLabel: input.deploymentId,
     }),
     () =>
-      vc.getDeploymentLogs(tokenFor(store, "vercel"), input.deploymentId, vercelTeamId(store, r.teamId), input.limit ?? 100),
+      vc.getDeploymentLogs(tokenFor(store, "vercel", connectionId), input.deploymentId, vercelTeamId(store, r.teamId, connectionId), input.limit ?? 100),
   );
 }
 
@@ -188,7 +203,7 @@ export async function vercelSetEnvVar(
   input: Base & { key: string; value: string; target?: string[] },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = vercelResource(store, project, environment);
+  const { r, connectionId } = vercelResource(store, project, environment);
   const target = input.target ?? [environment.isProduction ? "production" : "preview"];
   return runGuarded(
     store,
@@ -197,10 +212,10 @@ export async function vercelSetEnvVar(
     }),
     () =>
       vc.setEnvVar(
-        tokenFor(store, "vercel"),
+        tokenFor(store, "vercel", connectionId),
         r.projectId,
         { key: input.key, value: input.value, target },
-        vercelTeamId(store, r.teamId),
+        vercelTeamId(store, r.teamId, connectionId),
       ),
   );
 }
@@ -210,7 +225,7 @@ export async function vercelCreateDeployment(
   input: Base & { name?: string; deploymentId?: string },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = vercelResource(store, project, environment);
+  const { r, connectionId } = vercelResource(store, project, environment);
   const target = environment.isProduction ? "production" : "preview";
   return runGuarded(
     store,
@@ -219,9 +234,9 @@ export async function vercelCreateDeployment(
     }),
     () =>
       vc.createDeployment(
-        tokenFor(store, "vercel"),
+        tokenFor(store, "vercel", connectionId),
         { name: input.name ?? r.projectName ?? r.projectId, project: r.projectId, target, deploymentId: input.deploymentId },
-        vercelTeamId(store, r.teamId),
+        vercelTeamId(store, r.teamId, connectionId),
       ),
   );
 }
@@ -383,14 +398,14 @@ function runVercelLogs(
   tool: string,
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = vercelResource(store, project, environment);
-  const teamId = vercelTeamId(store, r.teamId);
+  const { r, connectionId } = vercelResource(store, project, environment);
+  const teamId = vercelTeamId(store, r.teamId, connectionId);
   const label = input.deploymentId ?? r.projectId;
   return runGuarded(
     store,
     ctx(project, environment, "vercel", "read", tool, `logs ${label}`, { resourceLabel: label }),
     () =>
-      fetchVercelLogsData(tokenFor(store, "vercel"), r, teamId, {
+      fetchVercelLogsData(tokenFor(store, "vercel", connectionId), r, teamId, {
         deploymentId: input.deploymentId,
         since: input.since,
         limit: input.limit,
@@ -410,11 +425,14 @@ export function vercelLogs(
 
 function railwayResource(store: Store, project: Project, environment: Environment) {
   const m = requireMapping(store, project, environment, "railway");
-  return m.resource as {
-    projectId: string;
-    environmentId?: string;
-    serviceId?: string;
-    projectName?: string;
+  return {
+    r: m.resource as {
+      projectId: string;
+      environmentId?: string;
+      serviceId?: string;
+      projectName?: string;
+    },
+    connectionId: m.connectionId,
   };
 }
 
@@ -492,13 +510,13 @@ function runRailwayLogs(
   tool: string,
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = railwayResource(store, project, environment);
+  const { r, connectionId } = railwayResource(store, project, environment);
   const label = input.deploymentId ?? r.projectId;
   return runGuarded(
     store,
     ctx(project, environment, "railway", "read", tool, `logs ${label}`, { resourceLabel: label }),
     () =>
-      fetchRailwayLogsData(tokenFor(store, "railway"), r, {
+      fetchRailwayLogsData(tokenFor(store, "railway", connectionId), r, {
         deploymentId: input.deploymentId,
         since: input.since,
         limit: input.limit,
@@ -517,13 +535,13 @@ export function railwayLogs(
 /** get_railway_project_context — Railway project + its environments/services. */
 export async function railwayProjectContext(store: Store, input: Base): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = railwayResource(store, project, environment);
+  const { r, connectionId } = railwayResource(store, project, environment);
   return runGuarded(
     store,
     ctx(project, environment, "railway", "read", "get_railway_project_context", `project ${r.projectId}`, {
       resourceLabel: r.projectId,
     }),
-    () => rw.getProject(tokenFor(store, "railway"), r.projectId),
+    () => rw.getProject(tokenFor(store, "railway", connectionId), r.projectId),
   );
 }
 
@@ -533,7 +551,7 @@ export async function railwayDeployments(
   input: Base & { limit?: number },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = railwayResource(store, project, environment);
+  const { r, connectionId } = railwayResource(store, project, environment);
   return runGuarded(
     store,
     ctx(project, environment, "railway", "read", "get_railway_deployments", `deployments ${r.projectId}`, {
@@ -541,7 +559,7 @@ export async function railwayDeployments(
     }),
     () =>
       rw.listDeployments(
-        tokenFor(store, "railway"),
+        tokenFor(store, "railway", connectionId),
         { projectId: r.projectId, environmentId: r.environmentId, serviceId: r.serviceId },
         input.limit ?? 10,
       ),
@@ -558,7 +576,7 @@ export async function railwayCreateDeployment(
   input: Base & { deploymentId?: string },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = railwayResource(store, project, environment);
+  const { r, connectionId } = railwayResource(store, project, environment);
   const label = input.deploymentId ?? r.projectId;
   return runGuarded(
     store,
@@ -566,7 +584,7 @@ export async function railwayCreateDeployment(
       resourceLabel: label,
     }),
     () => {
-      const token = tokenFor(store, "railway");
+      const token = tokenFor(store, "railway", connectionId);
       if (input.deploymentId) return rw.redeploy(token, input.deploymentId);
       if (!r.environmentId || !r.serviceId) {
         throw new OfflocalError(
@@ -593,7 +611,7 @@ export async function railwaySetEnvVar(
   input: Base & { key: string; value: string; serviceId?: string; skipDeploys?: boolean },
 ): Promise<GuardedResponse> {
   const { project, environment } = resolve(store, input);
-  const r = railwayResource(store, project, environment);
+  const { r, connectionId } = railwayResource(store, project, environment);
   return runGuarded(
     store,
     ctx(project, environment, "railway", "env_change", "set_railway_env_var", `set var ${input.key} on ${r.projectId}`, {
@@ -605,7 +623,7 @@ export async function railwaySetEnvVar(
           "Railway variable changes need the mapping to include environmentId.",
         );
       }
-      return rw.upsertVariable(tokenFor(store, "railway"), {
+      return rw.upsertVariable(tokenFor(store, "railway", connectionId), {
         projectId: r.projectId,
         environmentId: r.environmentId,
         serviceId: input.serviceId ?? r.serviceId,
@@ -735,7 +753,7 @@ export async function supabaseProjectContext(store: Store, input: Base): Promise
     ctx(project, environment, "supabase", "read", "get_supabase_project_context", `project ${r.projectRef}`, {
       resourceLabel: r.projectRef,
     }),
-    () => sb.getProject(tokenFor(store, "supabase"), r.projectRef),
+    () => sb.getProject(tokenFor(store, "supabase", m.connectionId), r.projectRef),
   );
 }
 
@@ -760,7 +778,7 @@ export async function supabaseQuery(
     ),
     // Reads are sent with read_only:true (real backend enforcement). Writes that
     // are allowed by policy run as read_only:false.
-    () => sb.runQuery(tokenFor(store, "supabase"), r.projectRef, input.sql, classified.readOnly),
+    () => sb.runQuery(tokenFor(store, "supabase", m.connectionId), r.projectRef, input.sql, classified.readOnly),
   );
 }
 
