@@ -4,22 +4,6 @@
 
 > MCPs give AI agents *tools*. offlocal.ai gives AI agents *production context*.
 
-When an AI coding agent (Claude Code, Codex, Cursor) connects to a provider MCP,
-it typically gets one account wired in globally. But real developers don't live
-in one account. They have:
-
-- one GitHub org with many repos,
-- one or more Vercel teams/projects,
-- multiple Supabase projects,
-- Stripe test/live accounts,
-- staging vs production,
-- client projects,
-- and production resources that must not be touched without approval.
-
-A tool that can "deploy to Vercel" is dangerous if the agent doesn't know
-*which* Vercel project, in *which* environment, for *which* account — and
-whether it's even allowed to.
-
 `@offlocal/mcp` is one local MCP server an agent connects to so it can ask:
 
 - Which project am I working on?
