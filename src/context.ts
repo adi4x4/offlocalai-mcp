@@ -68,6 +68,9 @@ function actionCatalog(envName: string, stripeMode: "test" | "live"): ActionCata
     { provider: "railway", capability: "read", label: "read Railway deployment status & logs" },
     { provider: "railway", capability: "deploy", label: `deploy to Railway (${envName})` },
     { provider: "railway", capability: "env_change", label: `change Railway variables (${envName})` },
+    { provider: "render", capability: "read", label: "read Render deploy status & logs" },
+    { provider: "render", capability: "deploy", label: `deploy to Render (${envName})` },
+    { provider: "render", capability: "env_change", label: `change Render env vars (${envName})` },
     { provider: "supabase", capability: "read", label: `query ${envName} Supabase (read-only)` },
     { provider: "stripe", capability: "read", label: "list Stripe products/prices" },
     { provider: "stripe", capability: "write", live: stripeMode === "live", label: `create Stripe ${stripeMode}-mode products/prices` },
@@ -153,6 +156,7 @@ export interface EnvironmentContext {
   source: { githubRepo?: string };
   deployment: { vercelProject?: string; latest: VercelSnapshot["latest"]; lastKnownIssue?: string; liveDataError?: string };
   railway?: { projectId: string; environmentId?: string; serviceId?: string };
+  render?: { serviceId: string; serviceName?: string };
   database: { supabaseProjectRef?: string; writes: string };
   payments: { stripeMode?: string; testWrites: string; liveWrites: string };
   allowed: string[];
@@ -191,6 +195,11 @@ async function buildEnvironmentContext(
           environmentId: railwayMap.resource.environmentId,
           serviceId: railwayMap.resource.serviceId,
         }
+      : undefined;
+  const renderMap = findMapping(store, env, "render");
+  const render =
+    renderMap && renderMap.resource.provider === "render"
+      ? { serviceId: renderMap.resource.serviceId, serviceName: renderMap.resource.serviceName }
       : undefined;
 
   const githubRepo =
@@ -254,6 +263,7 @@ async function buildEnvironmentContext(
       liveDataError: vercelSnapshot?.liveDataError,
     },
     railway,
+    render,
     database: { supabaseProjectRef: supabaseRef, writes: supabaseWrites },
     payments: { stripeMode, testWrites: stripeTestWrites, liveWrites: stripeLiveWrites },
     allowed: buckets.allowed,
@@ -310,6 +320,9 @@ function renderEnvSummary(project: Project, ec: EnvironmentContext): string {
   if (ec.railway) {
     L.push(`- Railway project: ${ec.railway.projectId}`);
     if (ec.railway.serviceId) L.push(`- Railway service: ${ec.railway.serviceId}`);
+  }
+  if (ec.render) {
+    L.push(`- Render service: ${ec.render.serviceName ?? ec.render.serviceId}`);
   }
   L.push("");
   L.push("Database:");

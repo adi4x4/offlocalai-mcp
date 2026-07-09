@@ -419,6 +419,117 @@ describe("Multi-account connections", () => {
   });
 });
 
+describe("Render", () => {
+  function mapRender(store: Store, environment: string) {
+    mapProviderResource(store, {
+      project: "acme-crm",
+      environment,
+      provider: "render",
+      resource: { provider: "render", serviceId: "srv-1", serviceName: "acme-web" },
+    });
+  }
+
+  /** Route a mocked fetch by method + URL to the right Render endpoint payload. */
+  function routeRender(opts: { service?: any; deploys?: any[]; deploy?: any; logs?: any[] }) {
+    return (url: string, init?: any) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (url.includes("/env-vars/")) return mockOk({ key: "K", value: "V" });
+      if (url.includes("/logs")) return mockOk({ logs: opts.logs ?? [] });
+      if (/\/services\/[^/]+\/deploys\/[^/]+/.test(url)) return mockOk(opts.deploy ?? {});
+      if (/\/services\/[^/]+\/deploys/.test(url)) {
+        if (method === "POST") return mockOk(opts.deploy ?? { id: "dep-new", status: "created" });
+        return mockOk((opts.deploys ?? []).map((d) => ({ deploy: d })));
+      }
+      if (/\/services\/[^/]+$/.test(url)) return mockOk(opts.service ?? {});
+      return mockOk({});
+    };
+  }
+
+  const SERVICE = { id: "srv-1", name: "acme-web", type: "web_service", ownerId: "tea-1", serviceDetails: { url: "https://acme-web.onrender.com" } };
+
+  beforeEach(() => {
+    process.env.RENDER_API_KEY = "rnd_dummy";
+  });
+
+  it("get_render_logs resolves owner + latest deploy and returns normalized logs", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRender(store, "staging");
+    fetchMock.mockImplementation(async (url: string, init: any) =>
+      routeRender({
+        service: SERVICE,
+        deploys: [{ id: "dep-1", status: "live" }],
+        logs: [
+          { timestamp: "2026-06-09T12:00:01Z", level: "info", message: "Starting" },
+          { timestamp: "2026-06-09T12:00:02Z", level: "error", message: "Boom: missing DATABASE_URL" },
+        ],
+      })(url, init),
+    );
+
+    const res = await pa.renderLogs(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    const data = (res as any).data;
+    expect(data.resource.deployment_id).toBe("dep-1");
+    expect(data.resource.deployment_status).toBe("live");
+    expect(data.logs).toHaveLength(2);
+    expect(data.logs[1]).toMatchObject({ level: "error", message: "Boom: missing DATABASE_URL" });
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "render", tool: "get_render_logs" });
+  });
+
+  it("requires approval for a production deploy and does NOT execute", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRender(store, "production");
+    fetchMock.mockImplementation(async (url: string, init: any) => routeRender({})(url, init));
+    const res = await pa.renderCreateDeployment(store, { environment: "production" });
+    expect(res.status).toBe("approval_required");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(lastAudit(store)).toMatchObject({ result: "not_executed", policyDecision: "approval_required" });
+  });
+
+  it("allows and executes a staging deploy", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRender(store, "staging");
+    fetchMock.mockImplementation(async (url: string, init: any) =>
+      routeRender({ deploy: { id: "dep-2", status: "created" } })(url, init),
+    );
+    const res = await pa.renderCreateDeployment(store, { environment: "staging" });
+    expect(res.status).toBe("ok");
+    expect((res as any).data.id).toBe("dep-2");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastAudit(store)).toMatchObject({ result: "success", provider: "render", tool: "create_render_deployment" });
+  });
+
+  it("requires approval for a production env-var change and does NOT execute", async () => {
+    const store = freshStore();
+    seedAcme(store);
+    mapRender(store, "production");
+    fetchMock.mockImplementation(async (url: string, init: any) => routeRender({})(url, init));
+    const res = await pa.renderSetEnvVar(store, { environment: "production", key: "DATABASE_URL", value: "postgres://..." });
+    expect(res.status).toBe("approval_required");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("get_app_logs reads render when it is the mapped log provider", async () => {
+    const store = freshStore();
+    createProject(store, { name: "Rd", slug: "rd" });
+    addEnvironment(store, { project: "rd", name: "staging" });
+    mapProviderResource(store, {
+      project: "rd",
+      environment: "staging",
+      provider: "render",
+      resource: { provider: "render", serviceId: "srv-9" },
+    });
+    fetchMock.mockImplementation(async (url: string, init: any) =>
+      routeRender({ service: { id: "srv-9", ownerId: "tea-9", serviceDetails: { url: "https://x.onrender.com" } }, deploys: [{ id: "d9", status: "live" }], logs: [{ timestamp: "t", level: "info", message: "hi" }] })(url, init),
+    );
+    const res = await pa.appLogs(store, { project: "rd", environment: "staging" });
+    expect(res.status).toBe("ok");
+    expect(res.providers.map((p: any) => p.provider)).toEqual(["render"]);
+  });
+});
+
 describe("Supabase", () => {
   it("blocks destructive SQL everywhere and does NOT execute", async () => {
     const store = freshStore();

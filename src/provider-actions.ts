@@ -13,6 +13,7 @@ import * as vc from "./providers/vercel.js";
 import * as sb from "./providers/supabase.js";
 import * as st from "./providers/stripe.js";
 import * as rw from "./providers/railway.js";
+import * as rd from "./providers/render.js";
 import type { ActionContext, Capability, Environment, Project, ProviderId } from "./types.js";
 import { findConnection } from "./resolve.js";
 import { resolveToken } from "./providers/auth.js";
@@ -45,7 +46,7 @@ function resolve(store: Store, input: Base): { project: Project; environment: En
  * env var — this is what lets two projects use two different accounts of the
  * same provider. Falls back to the provider's default connection / env var.
  */
-function tokenFor(store: Store, provider: ProviderId, connectionId?: string): string {
+export function tokenFor(store: Store, provider: ProviderId, connectionId?: string): string {
   const conn = findConnection(store, provider, connectionId);
   if (conn) return resolveToken(conn);
   const envVar = defaultEnvVar(provider);
@@ -58,7 +59,7 @@ function tokenFor(store: Store, provider: ProviderId, connectionId?: string): st
   return v.trim();
 }
 
-function vercelTeamId(
+export function vercelTeamId(
   store: Store,
   mappingTeamId?: string,
   connectionId?: string,
@@ -247,7 +248,7 @@ export async function vercelCreateDeployment(
 // environment (including production) and audited like any other guarded action.
 
 /** Providers that can serve app logs in V0, in priority order (Vercel first). */
-const LOG_PROVIDERS: ProviderId[] = ["vercel", "railway"];
+const LOG_PROVIDERS: ProviderId[] = ["vercel", "railway", "render"];
 
 interface NormalizedLog {
   timestamp: string;
@@ -298,6 +299,12 @@ function normalizeVercelEvent(e: vc.VercelLogEvent): NormalizedLog {
 function normalizeRailwayLog(l: rw.RailwayLog): NormalizedLog {
   const sev = (l.severity ?? "").toLowerCase();
   const level = /err|fatal|crit/.test(sev) ? "error" : /warn/.test(sev) ? "warn" : "info";
+  return { level, timestamp: l.timestamp ?? "", message: redactSecrets(l.message ?? "") };
+}
+
+function normalizeRenderLog(l: rd.RenderLog): NormalizedLog {
+  const lvl = (l.level ?? "").toLowerCase();
+  const level = /err|fatal|crit/.test(lvl) ? "error" : /warn/.test(lvl) ? "warn" : "info";
   return { level, timestamp: l.timestamp ?? "", message: redactSecrets(l.message ?? "") };
 }
 
@@ -635,6 +642,199 @@ export async function railwaySetEnvVar(
   );
 }
 
+// --- Render ----------------------------------------------------------------
+
+function renderResource(store: Store, project: Project, environment: Environment) {
+  const m = requireMapping(store, project, environment, "render");
+  return {
+    r: m.resource as { serviceId: string; serviceName?: string; ownerId?: string },
+    connectionId: m.connectionId,
+  };
+}
+
+/**
+ * Resolve the latest Render deploy (for status/URL) and fetch the mapped
+ * service's logs. Render's logs endpoint is service-scoped (not deploy-scoped),
+ * so `deploymentId` only picks which deploy's status is reported; the log lines
+ * are the service's recent logs. Log-availability problems become a
+ * `limitation` (with status attached) rather than a thrown error.
+ */
+async function fetchRenderLogsData(
+  token: string,
+  r: { serviceId: string; ownerId?: string },
+  opts: { deploymentId?: string; since?: string; limit?: number },
+): Promise<LogResult> {
+  const limit = opts.limit ?? 100;
+  const time_range = { since: opts.since };
+
+  // The logs API needs an ownerId; resolve it from the service if not mapped.
+  let ownerId = r.ownerId;
+  let deployment_url: string | undefined;
+  if (!ownerId) {
+    try {
+      const svc = await rd.getService(token, r.serviceId);
+      ownerId = svc.ownerId;
+      deployment_url = httpsUrl(svc.url);
+    } catch {
+      /* best-effort — continue without ownerId (logs may still be unavailable) */
+    }
+  }
+
+  let deploymentId = opts.deploymentId;
+  let deployment_status: string | undefined;
+  if (!deploymentId) {
+    try {
+      const deps = await rd.listDeploys(token, r.serviceId, 1);
+      if (deps.length > 0) {
+        deploymentId = deps[0]!.id;
+        deployment_status = deps[0]!.status;
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  const resource = {
+    service: r.serviceId,
+    deployment_id: deploymentId,
+    deployment_url,
+    deployment_status,
+  };
+
+  if (!ownerId) {
+    return {
+      resource,
+      time_range,
+      logs: [],
+      limitation:
+        "Could not resolve the Render owner id required by the logs API. Add `ownerId` to the " +
+        "render mapping, or ensure the API key can read the service.",
+      audit_written: true,
+    };
+  }
+
+  try {
+    const raw = await rd.getLogs(token, ownerId, r.serviceId, limit, opts.since);
+    const logs = raw.map(normalizeRenderLog);
+    const limitation =
+      logs.length === 0
+        ? "Render returned no log lines for this service in the requested window."
+        : undefined;
+    return { resource, time_range, logs, limitation, audit_written: true };
+  } catch (err) {
+    return {
+      resource,
+      time_range,
+      logs: [],
+      limitation:
+        `Could not fetch Render logs (${err instanceof Error ? err.message : String(err)}). ` +
+        "Returning the deployment status only.",
+      audit_written: true,
+    };
+  }
+}
+
+/** Shared guarded Render log read; `tool` distinguishes the audited entry. */
+function runRenderLogs(
+  store: Store,
+  input: Base & { deploymentId?: string; since?: string; limit?: number },
+  tool: string,
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const { r, connectionId } = renderResource(store, project, environment);
+  const label = input.deploymentId ?? r.serviceId;
+  return runGuarded(
+    store,
+    ctx(project, environment, "render", "read", tool, `logs ${label}`, { resourceLabel: label }),
+    () =>
+      fetchRenderLogsData(tokenFor(store, "render", connectionId), r, {
+        deploymentId: input.deploymentId,
+        since: input.since,
+        limit: input.limit,
+      }),
+  );
+}
+
+/** get_render_logs — Render-specific; resolves the latest deploy if none given. */
+export function renderLogs(
+  store: Store,
+  input: Base & { deploymentId?: string; since?: string; limit?: number },
+): Promise<GuardedResponse> {
+  return runRenderLogs(store, input, "get_render_logs");
+}
+
+/** get_render_service_context — the mapped Render service (type, URL, repo/branch). */
+export async function renderServiceContext(store: Store, input: Base): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const { r, connectionId } = renderResource(store, project, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "render", "read", "get_render_service_context", `service ${r.serviceId}`, {
+      resourceLabel: r.serviceId,
+    }),
+    () => rd.getService(tokenFor(store, "render", connectionId), r.serviceId),
+  );
+}
+
+/** get_render_deployments — recent deploys for the mapped service. */
+export async function renderDeployments(
+  store: Store,
+  input: Base & { limit?: number },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const { r, connectionId } = renderResource(store, project, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "render", "read", "get_render_deployments", `deploys ${r.serviceId}`, {
+      resourceLabel: r.serviceId,
+    }),
+    () => rd.listDeploys(tokenFor(store, "render", connectionId), r.serviceId, input.limit ?? 10),
+  );
+}
+
+/**
+ * create_render_deployment — trigger a deploy of the mapped Render service.
+ * PRODUCTION deploys require approval by default (capability "deploy").
+ */
+export async function renderCreateDeployment(
+  store: Store,
+  input: Base & { commitId?: string; clearCache?: boolean },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const { r, connectionId } = renderResource(store, project, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "render", "deploy", "create_render_deployment", `deploy ${r.serviceId}`, {
+      resourceLabel: r.serviceId,
+    }),
+    () =>
+      rd.triggerDeploy(tokenFor(store, "render", connectionId), r.serviceId, {
+        commitId: input.commitId,
+        clearCache: input.clearCache,
+      }),
+  );
+}
+
+/**
+ * set_render_env_var — create/update a Render env var. PRODUCTION env changes
+ * require approval by default (capability "env_change"). Render redeploys the
+ * service on change.
+ */
+export async function renderSetEnvVar(
+  store: Store,
+  input: Base & { key: string; value: string },
+): Promise<GuardedResponse> {
+  const { project, environment } = resolve(store, input);
+  const { r, connectionId } = renderResource(store, project, environment);
+  return runGuarded(
+    store,
+    ctx(project, environment, "render", "env_change", "set_render_env_var", `set var ${input.key} on ${r.serviceId}`, {
+      resourceLabel: `${r.serviceId}:${input.key}`,
+    }),
+    () => rd.upsertEnvVar(tokenFor(store, "render", connectionId), r.serviceId, input.key, input.value),
+  );
+}
+
 /** get_latest_deployment_logs — convenience; latest deployment for the provider. */
 export async function latestDeploymentLogs(
   store: Store,
@@ -647,6 +847,9 @@ export async function latestDeploymentLogs(
   }
   if (provider === "railway") {
     return runRailwayLogs(store, base, "get_latest_deployment_logs");
+  }
+  if (provider === "render") {
+    return runRenderLogs(store, base, "get_latest_deployment_logs");
   }
   // Other providers don't serve deployment logs in V0 — audit the read and
   // return a clear limitation instead of pretending.
@@ -712,6 +915,8 @@ export async function appLogs(
       providers.push(await runVercelLogs(store, logInput, "get_app_logs"));
     } else if (p === "railway") {
       providers.push(await runRailwayLogs(store, logInput, "get_app_logs"));
+    } else if (p === "render") {
+      providers.push(await runRenderLogs(store, logInput, "get_app_logs"));
     } else {
       providers.push(
         await runGuarded(

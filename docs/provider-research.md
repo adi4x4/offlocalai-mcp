@@ -12,6 +12,8 @@ only; tokens are read at call time and never persisted.
 |---|---|---|
 | GitHub | Fine-grained PAT | `GITHUB_TOKEN` |
 | Vercel | Account/team token | `VERCEL_TOKEN`, `VERCEL_TEAM_ID?` |
+| Railway | Account/workspace token | `RAILWAY_TOKEN` |
+| Render | API key | `RENDER_API_KEY` |
 | Supabase | Personal Access Token | `SUPABASE_ACCESS_TOKEN` |
 | Stripe | Secret keys (test+live) | `STRIPE_TEST_SECRET_KEY`, `STRIPE_LIVE_SECRET_KEY` |
 
@@ -233,6 +235,40 @@ _Researched against docs.railway.com (public-api, graphql-overview, manage-deplo
 - Project tokens (`Project-Access-Token`) not yet supported — account/workspace token only.
 - `deploymentLogs` returns recent runtime logs; very old logs may be unavailable
 - `variableUpsert` triggers a redeploy of affected services unless `skipDeploys: true` — exposed via the tool's `skip_deploys` arg.
+
+---
+
+## Render
+
+_Researched against api-docs.render.com (REST reference). 2026-07-09._
+
+### Base URL, auth & resource model
+- **Base URL:** `https://api.render.com/v1` — a standard REST API.
+- **Auth:** `Authorization: Bearer <RENDER_API_KEY>` (+ `Accept: application/json`) via `RENDER_API_KEY`.
+- **Resource model:** owner (workspace, `usr-`/`tea-`) → service (`srv-`) → deploy. A mapping carries `serviceId`; `ownerId` is only needed for the logs endpoint and is auto-resolved from the service when absent.
+- **List shape:** list endpoints wrap each item in an object with a `cursor`, e.g. `[{ deploy: {...}, cursor }]`; single-resource reads return the object directly.
+
+### Key endpoints
+| Action | Method + Path | Notes |
+|---|---|---|
+| Get a service | `GET /services/{serviceId}` | public URL is `serviceDetails.url` (web services / static sites); absent for workers, cron jobs, private services |
+| List deploys | `GET /services/{serviceId}/deploys` | newest first; `limit` (1–100) |
+| Get a deploy | `GET /services/{serviceId}/deploys/{deployId}` | used to poll deploy status |
+| Trigger a deploy | `POST /services/{serviceId}/deploys` | body `{ commitId?, clearCache?, imageUrl?, deployMode? }`; 201/202 |
+| Service logs | `GET /logs?ownerId=&resource={serviceId}` | **owner-scoped**, needs `ownerId`; `startTime`/`endTime`/`limit`/`level`… ; returns `{ logs, hasMore, nextStartTime }` |
+| Upsert env var | `PUT /services/{serviceId}/env-vars/{key}` | body `{ value }` — creates or updates one variable; Render redeploys on change |
+
+- **Deploy status enum:** `created`, `build_in_progress`, `update_in_progress`, `pre_deploy_in_progress` (in progress); `live` (success); `build_failed`, `update_failed`, `pre_deploy_failed`, `canceled`, `deactivated` (failure). The `deploy` orchestrator treats `live` as success and the four `*_failed`/`canceled`/`deactivated` states as failure; everything else is still in progress.
+- **Logs are service-scoped, not deploy-scoped** — the `/logs` endpoint filters by resource (the service), so "deployment logs" for Render are the service's recent logs; we report the latest deploy's id/status alongside them.
+
+### Safe vs dangerous
+- **Safe / read-only:** get service, list/get deploys, service logs.
+- **Dangerous (gated like Vercel/Railway):** `POST .../deploys` (deploy), `PUT .../env-vars/{key}` (env_change). These flow through `runGuarded`, so production requires approval by default. Service delete is not exposed (delete is blocked everywhere by default).
+
+### Limitations / TODOs
+- The logs API requires an `ownerId`; we resolve it from the service on demand and cache nothing — if the key can't read the service, we return a clear `limitation` rather than failing.
+- Deploy-from-local-files is out of scope; Render deploys are git- or image-backed (trigger a deploy of the connected repo, optionally at a `commitId`).
+- Static sites and web services expose `serviceDetails.url`; background workers / private services / cron jobs have no public URL — `deploy` reports success without a URL for those.
 
 ---
 

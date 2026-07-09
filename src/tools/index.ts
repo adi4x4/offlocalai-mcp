@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Store } from "../storage.js";
 import * as svc from "../service.js";
 import * as pa from "../provider-actions.js";
+import * as dep from "../deploy.js";
 import { PROVIDER_IDS } from "../types.js";
 
 /**
@@ -41,7 +42,8 @@ function guard<A>(fn: (args: A) => unknown | Promise<unknown>) {
   };
 }
 
-const provider = z.enum(["github", "vercel", "supabase", "stripe", "railway"]);
+const provider = z.enum(["github", "vercel", "supabase", "stripe", "railway", "render"]);
+const deployProvider = z.enum(["vercel", "railway", "render"]);
 const capability = z.enum(["read", "write", "deploy", "env_change", "delete", "destructive_sql"]);
 
 export function registerTools(server: McpServer, store: Store): void {
@@ -346,6 +348,71 @@ function registerProviderTools(server: McpServer, store: Store): void {
   const env = z.string().describe("Environment id or name");
   const proj = z.string().optional().describe("Project id or slug; uses selected if omitted");
 
+  // --- Deploy (the one interface) ----------------------------------------
+  // One tool to ship. It picks the mapped deploy provider, triggers the deploy
+  // through the normal guarded flow (so production still asks for approval and
+  // everything is audited), waits for it to finish, and returns the live URL —
+  // or, on failure, a tail of the logs.
+
+  server.registerTool(
+    "deploy",
+    {
+      title: "Deploy",
+      description:
+        "Ship a project environment. THE deploy tool — say the project and environment and offlocal " +
+        "figures out the rest: it finds the mapped deploy target (Vercel, Railway, or Render), triggers " +
+        "the deployment, waits for it to finish, and returns the live URL. On failure it returns a tail " +
+        "of the build logs so you can fix and redeploy. Non-production deploys just run; production " +
+        "deploys return 'approval_required' until approved. Pass `provider` only if an environment has " +
+        "more than one deploy target.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        provider: deployProvider.optional().describe("Only needed when >1 deploy target is mapped to the environment"),
+        wait: z.boolean().optional().describe("Wait for the deploy to finish (default true); false returns as soon as it's triggered"),
+        timeout_seconds: z.number().optional().describe("Max seconds to wait for a terminal state (default 180)"),
+        commit_id: z.string().optional().describe("Vercel/Render: deploy a specific git commit"),
+        deployment_id: z.string().optional().describe("Vercel: redeploy an existing deployment by id"),
+      },
+    },
+    guard((a: any) =>
+      dep.deploy(store, {
+        project: a.project,
+        environment: a.environment,
+        provider: a.provider,
+        wait: a.wait,
+        timeoutSeconds: a.timeout_seconds,
+        commitId: a.commit_id,
+        deploymentId: a.deployment_id,
+      }),
+    ),
+  );
+
+  server.registerTool(
+    "get_deploy_status",
+    {
+      title: "Get deploy status",
+      description:
+        "Check the current status and URL of a deployment WITHOUT triggering a new one. Useful after a " +
+        "`deploy` with wait:false, or to poll a long build. Returns deployed / failed / deploying plus the " +
+        "live URL when ready.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        provider: deployProvider.optional().describe("Only needed when >1 deploy target is mapped"),
+        deployment_id: z.string().describe("The deployment/deploy id to check"),
+      },
+    },
+    guard((a: any) =>
+      dep.deployStatus(store, {
+        project: a.project,
+        environment: a.environment,
+        provider: a.provider,
+        deploymentId: a.deployment_id,
+      }),
+    ),
+  );
+
   // --- App logs ----------------------------------------------------------
   // Log reads are allowed by default in every environment (including
   // production); each read is policy-checked and written to the audit log.
@@ -619,6 +686,85 @@ function registerProviderTools(server: McpServer, store: Store): void {
         skipDeploys: a.skip_deploys,
       }),
     ),
+  );
+
+  // Render (REST API)
+  server.registerTool(
+    "get_render_service_context",
+    {
+      title: "Render service context",
+      description: "Read the mapped Render service: type, public URL, repo/branch, and suspended state.",
+      inputSchema: { project: proj, environment: env },
+    },
+    guard((a: any) => pa.renderServiceContext(store, a)),
+  );
+  server.registerTool(
+    "get_render_deployments",
+    {
+      title: "Render deploys",
+      description: "List recent deploys for the mapped Render service (newest first).",
+      inputSchema: { project: proj, environment: env, limit: z.number().optional() },
+    },
+    guard((a: any) => pa.renderDeployments(store, a)),
+  );
+  server.registerTool(
+    "get_render_logs",
+    {
+      title: "Get Render logs",
+      description:
+        "Fetch logs for the mapped Render service. Returns the latest deploy id/status plus recent log " +
+        "lines (Render's logs are service-scoped). Read-only and audited.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        deployment_id: z.string().optional().describe("Deploy whose status to report; logs are the service's recent logs"),
+        since: z.string().optional().describe("Only logs after this time (ISO timestamp)"),
+        limit: z.number().optional().describe("Max log lines (default 100)"),
+      },
+    },
+    guard((a: any) =>
+      pa.renderLogs(store, {
+        project: a.project,
+        environment: a.environment,
+        deploymentId: a.deployment_id,
+        since: a.since,
+        limit: a.limit,
+      }),
+    ),
+  );
+  server.registerTool(
+    "create_render_deployment",
+    {
+      title: "Create Render deployment",
+      description:
+        "Trigger a deploy of the mapped Render service. PRODUCTION deploys require approval by default. " +
+        "Prefer the `deploy` tool, which waits and returns the live URL.",
+      inputSchema: {
+        project: proj,
+        environment: env,
+        commit_id: z.string().optional().describe("Deploy a specific git commit"),
+        clear_cache: z.boolean().optional().describe("Clear the build cache before deploying"),
+      },
+    },
+    guard((a: any) =>
+      pa.renderCreateDeployment(store, {
+        project: a.project,
+        environment: a.environment,
+        commitId: a.commit_id,
+        clearCache: a.clear_cache,
+      }),
+    ),
+  );
+  server.registerTool(
+    "set_render_env_var",
+    {
+      title: "Set Render env var",
+      description:
+        "Create/update an environment variable on the mapped Render service. PRODUCTION changes require " +
+        "approval by default. Render redeploys the service on change.",
+      inputSchema: { project: proj, environment: env, key: z.string(), value: z.string() },
+    },
+    guard((a: any) => pa.renderSetEnvVar(store, a)),
   );
 
   // Supabase

@@ -39,6 +39,7 @@ interface ConfigEnvironment {
   supabase?: { project_ref: string; connection?: string };
   stripe?: { mode: "test" | "live"; connection?: string };
   railway?: { project_id: string; environment_id?: string; service_id?: string; connection?: string };
+  render?: { service_id: string; service_name?: string; owner_id?: string; connection?: string };
 }
 
 interface ConfigConnection {
@@ -121,6 +122,15 @@ function environmentResource(provider: ProviderId, env: ConfigEnvironment): Prov
             serviceId: env.railway.service_id,
           }
         : null;
+    case "render":
+      return env.render
+        ? {
+            provider,
+            serviceId: env.render.service_id,
+            serviceName: env.render.service_name,
+            ownerId: env.render.owner_id,
+          }
+        : null;
   }
 }
 
@@ -132,7 +142,7 @@ export interface SeedResult {
 
 export function applyConfig(store: Store, config: OfflocalConfig): SeedResult {
   const result: SeedResult = { createdProjects: [], skippedProjects: [], createdRules: 0 };
-  const providers: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
+  const providers: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway", "render"];
 
   // Named connections (multi-account) — create these first so mappings can bind
   // to them by label. Skip a label that already exists for the provider.

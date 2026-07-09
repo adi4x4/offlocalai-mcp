@@ -1,69 +1,23 @@
 # @offlocal/mcp
 
-**Production context layer for AI coding agents.**
+A local MCP server that gives an AI coding agent one `deploy` tool. You map each
+project environment to a provider resource (Vercel, Railway, or Render) once, and
+the agent deploys through a single tool that resolves the right project,
+environment, and account, waits for the build, and returns the result.
 
-> MCPs give AI agents *tools*. offlocal.ai gives AI agents *production context*.
+Provider tokens are read from environment variables at call time and are not
+written to disk. State (projects, environments, mappings) is stored as JSON files
+under `.offlocal/`.
 
-`@offlocal/mcp` is one local MCP server an agent connects to so it can ask:
+## Requirements
 
-- Which project am I working on?
-- Which environment is active?
-- Which GitHub repo / Vercel project / Supabase project / Stripe mode belongs to it?
-- What am I allowed to do? What's blocked? What requires human approval?
-- What happened last time?
+- Node >= 18.
 
-It resolves **project → environment → provider mapping → policy/safety check →
-provider API → audit log / project memory** before any real action runs.
+## Install
 
----
+The server runs from npm via `npx`; there is nothing to clone.
 
-## The problem, concretely
-
-```
-AI coding agent
-  → @offlocal/mcp
-    → workspace
-      → project            (your-project)
-        → environment      (staging | production)
-          → provider mappings   (github repo, vercel project, supabase ref, stripe mode)
-            → policy / safety check   (allow | block | approval_required)
-              → provider API action
-                → audit log + project memory
-```
-
-Every provider action is forced through one choke point that resolves the right
-account/environment, checks policy, and writes an audit entry. There is no path
-to a provider call that skips this.
-
----
-
-## Status: V0
-
-- Local-first and **open source** (Apache 2.0). Runs entirely on your machine.
-- Providers: **GitHub, Vercel, Supabase, Stripe** (direct REST APIs) and
-  **Railway** (GraphQL API).
-- Storage: plain JSON files under `.offlocal/` (zero native deps).
-- Auth: **environment variables only** — tokens are read at call time and never
-  written to disk.
-
-See [`docs/provider-research.md`](docs/provider-research.md) for the API/auth
-research behind each adapter.
-
----
-
-## Getting started
-
-Requires Node ≥ 18. There is **nothing to clone and no config file to fill in** —
-the server runs straight from npm, and you set everything else up by talking to
-your agent.
-
-### Step 1 — Add offlocal to your AI agent
-
-Point your agent at `@offlocal/mcp` over `npx` and pass the provider tokens you
-actually use as env vars. The server is published to npm, so `npx` fetches and
-runs it on demand.
-
-**Claude Code** — create `.mcp.json` in your project root:
+Claude Code — `.mcp.json` in the project root:
 
 ```json
 {
@@ -73,327 +27,252 @@ runs it on demand.
       "command": "npx",
       "args": ["-y", "-p", "@offlocal/mcp", "offlocal-mcp"],
       "env": {
-        "GITHUB_TOKEN": "ghp_your_token",
         "VERCEL_TOKEN": "your_vercel_token",
-        "RAILWAY_TOKEN": "your_railway_token"
+        "RAILWAY_TOKEN": "your_railway_token",
+        "RENDER_API_KEY": "your_render_key"
       }
     }
   }
 }
 ```
 
-**Cursor** — `.cursor/mcp.json` (same shape, drop the `"type"` field).
-**Codex** — `~/.codex/config.toml`:
+Cursor — `.cursor/mcp.json`, same shape without the `"type"` field.
+
+Codex — `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.offlocal]
 command = "npx"
 args = ["-y", "-p", "@offlocal/mcp", "offlocal-mcp"]
-env = { GITHUB_TOKEN = "ghp_your_token", VERCEL_TOKEN = "your_vercel_token" }
+env = { VERCEL_TOKEN = "your_vercel_token", RENDER_API_KEY = "your_render_key" }
 ```
 
-> Only include tokens for the providers you'll use — every other provider simply
-> stays unavailable. Tokens are read at call time and never written to disk.
-> Restart your agent (or reconnect MCP servers) after editing the config.
+Include only the tokens for providers you use. Restart the agent or reconnect MCP
+servers after editing the config.
 
-### Step 2 — Provider tokens
+## Provider tokens
 
 | Variable | Provider | Notes |
 |---|---|---|
-| `GITHUB_TOKEN` | GitHub | Fine-grained PAT (Metadata: read, Contents: read) |
-| `VERCEL_TOKEN` | Vercel | Account/team token |
+| `VERCEL_TOKEN` | Vercel | Account or team token |
 | `VERCEL_TEAM_ID` | Vercel | Optional; required for team-owned resources |
+| `RAILWAY_TOKEN` | Railway | Account or workspace token |
+| `RENDER_API_KEY` | Render | API key |
+| `GITHUB_TOKEN` | GitHub | Fine-grained PAT (Metadata: read, Contents: read) |
 | `SUPABASE_ACCESS_TOKEN` | Supabase | Personal access token |
 | `STRIPE_TEST_SECRET_KEY` | Stripe | `sk_test_...` |
-| `STRIPE_LIVE_SECRET_KEY` | Stripe | `sk_live_...` — only used when policy allows a live write |
-| `RAILWAY_TOKEN` | Railway | Account/workspace token |
+| `STRIPE_LIVE_SECRET_KEY` | Stripe | `sk_live_...` |
 
-### Step 3 — Let the agent set up your project (no YAML)
+## Setup
 
-The **first time** you connect there are no projects yet — that's expected. You
-don't create them by hand or edit any file; you just ask your agent, and it calls
-the setup tools for you. For example:
+There are no projects on first run. Create a project, add environments, and map
+each environment to a provider resource. The agent does this by calling the setup
+tools; you can describe it in plain language, for example:
 
-> "Use offlocal to create a project called **acme-crm** with a **staging** and a
-> **production** environment. Map my Vercel project **acme-crm-preview** to
-> staging and **acme-crm-prod** to production, and map Railway project
-> **`<railway-project-id>`** to production."
+> Create a project acme-crm with staging and production environments. Map the
+> Vercel project acme-crm-preview to staging and acme-crm-prod to production.
 
-Then start asking it to do real work:
+The tools used are `create_project`, `add_environment`, and
+`map_provider_resource`. State persists in `.offlocal/` in the agent's working
+directory (override with the `OFFLOCAL_HOME` environment variable), so setup is
+done once per machine. It can also be declared in a config file — see
+[Config file](#config-file).
 
-> "What's safe to touch in acme-crm staging?"
-> "Fetch the latest staging logs."
-> "Deploy acme-crm to Railway staging."
+## The deploy tool
 
-Behind the scenes the agent uses `create_project`, `add_environment`,
-`map_provider_resource`, `get_project_context`, and the provider tools — all
-gated by policy and written to the audit log. Your setup persists in a local
-`.offlocal/` directory (in the agent's working directory; override with the
-`OFFLOCAL_HOME` env var), so you only do Step 3 once per machine.
+`deploy` takes a project and environment. It selects the provider mapped to that
+environment, triggers the deployment, waits for the build to reach a terminal
+state, and returns the result.
 
-That's the whole setup. **You never have to write a config file.**
+```jsonc
+deploy({
+  project: "acme-crm",
+  environment: "staging",
+  // provider     required only when the environment has more than one deploy target
+  // wait         default true; set false to return immediately after triggering
+  // timeout_seconds  default 180
+  // commit_id    deploy a specific git commit (Vercel, Render)
+})
+```
 
-### Optional — declare everything in a config file instead
+Success returns the live URL:
 
-If you'd rather keep your setup as a version-controlled, repeatable file (handy
-for seeding several projects at once or sharing across a team), you *can* describe
-it in `.offlocal/config.yaml` and seed it with the bundled CLI — but this is
-entirely optional and most people can skip it:
+```json
+{
+  "status": "deployed",
+  "project": "acme-crm",
+  "environment": "staging",
+  "provider": "render",
+  "deploymentId": "dep-abc123",
+  "url": "https://acme-crm.onrender.com",
+  "state": "live"
+}
+```
+
+Failure returns the deployment state and a tail of the build logs:
+
+```json
+{
+  "status": "failed",
+  "provider": "render",
+  "state": "build_failed",
+  "logs": [
+    { "timestamp": "2026-06-09T12:00:02.000Z", "level": "error", "message": "Error: DATABASE_URL is missing" }
+  ]
+}
+```
+
+A production deploy returns `status: "approval_required"` and does not execute;
+see [Policy and audit](#policy-and-audit).
+
+If `wait` is false, `deploy` returns `status: "deploying"` with the deployment id.
+Use `get_deploy_status` to check it later.
+
+Provider selection: if one deploy target is mapped to the environment it is used;
+if more than one is mapped, pass `provider`; if none is mapped, `deploy` returns
+an error.
+
+## Providers
+
+Deploy targets:
+
+| Provider | Deploy | Logs | Env vars | API |
+|---|---|---|---|---|
+| Vercel | yes | yes | yes | REST |
+| Railway | yes | yes | yes | GraphQL |
+| Render | yes | yes | yes | REST |
+
+Context and data providers: GitHub (repo metadata, README, files), Supabase
+(project context, SQL with read/write classification), Stripe (products and
+prices, test and live keys held separately).
+
+## Other tools
+
+- `get_app_logs` — fetch recent logs for an environment from the mapped
+  provider. Recognizable secrets are redacted. Also `get_vercel_logs`,
+  `get_railway_logs`, `get_render_logs`, `get_latest_deployment_logs`.
+- `get_project_context` — for a project and optional environment, returns the
+  mapped resources, the latest deployment status and URL (best-effort), project
+  memory, recent audit entries, the allowed/blocked/approval-required action
+  lists, and a text summary. Intended as the first call in a session.
+- `read_project_memory` / `write_project_memory` — short notes per
+  project/environment, included in `get_project_context`.
+
+<details>
+<summary>Full tool list</summary>
+
+- Deploy: `deploy`, `get_deploy_status`
+- Project/workspace: `list_projects`, `create_project`, `select_project`, `get_project_context`, `add_environment`, `list_environments`
+- Connections/mappings: `add_provider_connection`, `list_provider_connections`, `map_provider_resource`, `list_provider_mappings`, `get_provider_mapping`
+- Logs: `get_app_logs`, `get_latest_deployment_logs`, `get_vercel_logs`, `get_railway_logs`, `get_render_logs`
+- Vercel: `get_vercel_project_context`, `get_vercel_deployments`, `get_vercel_deployment_status`, `get_vercel_deployment_logs`, `set_vercel_env_var`, `create_vercel_deployment`
+- Railway: `get_railway_project_context`, `get_railway_deployments`, `create_railway_deployment`, `set_railway_env_var`
+- Render: `get_render_service_context`, `get_render_deployments`, `create_render_deployment`, `set_render_env_var`
+- Supabase: `list_supabase_projects`, `get_supabase_project_context`, `query_supabase`
+- Stripe: `list_stripe_products`, `create_stripe_product`, `create_stripe_price`
+- Memory/audit/policy: `read_project_memory`, `write_project_memory`, `list_audit_log`, `check_policy`, `list_policy_rules`, `set_policy_rule`
+
+The `create_*_deployment` tools trigger a deploy without waiting. `deploy` wraps
+them, waits, and returns the result.
+</details>
+
+## Policy and audit
+
+Every provider action passes through one function (`runGuarded` in
+`src/actions.ts`) that resolves project and environment, evaluates policy, and
+writes an audit entry before any provider API is called. Policy is evaluated on
+capability, environment, provider, and a live flag — not on tool names.
+
+Defaults:
+
+- Reads are allowed in every environment.
+- Non-production writes and deploys are allowed.
+- Production writes, deploys, and env-var changes return `approval_required`.
+- Live Stripe writes return `approval_required`.
+- Deleting resources and destructive SQL (`DROP`/`TRUNCATE`/`DELETE`/`ALTER`) are
+  blocked in every environment.
+
+An `approval_required` or `blocked` action does not call the provider and is
+audited with `result: "not_executed"`. To allow a gated action, add a rule with
+`set_policy_rule` (higher priority wins). There is no separate approve/deny
+handshake yet.
+
+The audit log is `.offlocal/audit.log`, one JSON line per attempt. Read it with
+`list_audit_log`. Full reference: [docs/policy.md](docs/policy.md).
+
+## Config file
+
+Setup can be declared in `.offlocal/config.yaml` and seeded with the CLI instead
+of creating it through the agent:
 
 ```bash
 npx -p @offlocal/mcp offlocal init        # seeds from .offlocal/config.yaml if present
 npx -p @offlocal/mcp offlocal context acme-crm --env staging
 ```
 
-See [`.offlocal/config.example.yaml`](.offlocal/config.example.yaml) for the full
-schema. `require_approval` entries apply to **production** (staging/dev stay
-permissive); `block` entries apply **everywhere**.
+See [.offlocal/config.example.yaml](.offlocal/config.example.yaml) for the schema.
+`require_approval` entries apply to production; `block` entries apply everywhere.
 
-### Want zero setup?
+## CLI
 
-The self-hosted core in this repo is free and Apache-2.0 — you bring your own
-provider tokens and run it locally. A **managed** offering (hosted credential
-vault, one-click provider connect, real approve/deny workflows, an audit
-dashboard, and team seats) removes the manual steps above for teams that want it.
-See [offlocal.ai](https://offlocal.ai).
-
----
-
-## MCP tools
-
-**Project / workspace:** `list_projects`, `create_project`, `select_project`,
-`get_project_context`, `add_environment`, `list_environments`
-
-**Provider mappings:** `map_provider_resource`, `list_provider_mappings`,
-`get_provider_mapping`
-
-**Policy:** `check_policy`, `list_policy_rules`, `set_policy_rule`
-
-**Memory / audit:** `read_project_memory`, `write_project_memory`,
-`list_audit_log`
-
-**GitHub:** `get_github_repo_context`, `get_github_repo_readme`,
-`list_github_repo_files`
-
-**App logs:** `get_app_logs`, `get_vercel_logs`, `get_latest_deployment_logs`
-
-**Vercel:** `get_vercel_project_context`, `get_vercel_deployments`,
-`get_vercel_deployment_status`, `get_vercel_deployment_logs`,
-`set_vercel_env_var`*, `create_vercel_deployment`*
-
-**Railway:** `get_railway_project_context`, `get_railway_deployments`,
-`get_railway_logs`, `create_railway_deployment`*, `set_railway_env_var`*
-
-**Supabase:** `list_supabase_projects`, `get_supabase_project_context`,
-`query_supabase`*
-
-**Stripe:** `list_stripe_products`, `create_stripe_product`*,
-`create_stripe_price`*
-
-\* gated by policy (production / live / destructive operations require approval
-or are blocked — see below).
-
-> `get_project_context` is the one to call **first**. For a project (and
-> optionally a focused `environment`) it returns: the GitHub repo, the Vercel
-> project + **live latest deployment status / URL / failure** (best-effort), the
-> Supabase project, the Stripe mode, the **allowed / blocked / approval-required**
-> action lists, project memory, recent audit history, **suggested safe next
-> actions**, and a human-readable `summary` the agent can reason from directly.
-
----
-
-## Fetch app logs
-
-Ask the agent something like *"Use offlocal to fetch the latest staging logs."*
-It resolves the project/environment, finds the mapped Vercel project, fetches the
-latest deployment's logs, and the read is written to the audit log.
-
-- `get_app_logs` — generic. Pass `project` + `environment` (and optionally
-  `provider`, `deployment_id`, `since`, `limit`). With no `provider` it reads
-  every mapped provider that supports logs (Vercel + Railway in V0, Vercel
-  prioritized).
-- `get_vercel_logs` / `get_railway_logs` — provider-specific. Resolve the latest
-  deployment when `deployment_id` is omitted; return the deployment
-  id/url/status plus logs.
-- `get_latest_deployment_logs` — convenience; latest deployment for the mapped
-  provider (`provider` defaults to Vercel, also accepts `railway`).
-
-Log reads are a `read` capability, so they are **allowed by default in every
-environment, including production**. Secrets are redacted from log lines where
-recognizable, and every read is audited. If the provider's API can't return log
-lines, the tool returns the deployment status plus a clear `limitation` instead
-of failing silently — it never fabricates logs.
-
-```json
-{
-  "status": "ok",
-  "project": "acme-crm",
-  "environment": "staging",
-  "provider": "vercel",
-  "policy_decision": "allow",
-  "executed": true,
-  "data": {
-    "resource": {
-      "project": "acme-crm-preview",
-      "deployment_id": "dpl_…",
-      "deployment_url": "https://acme-crm-preview.vercel.app",
-      "deployment_status": "ERROR"
-    },
-    "time_range": { "since": null },
-    "logs": [
-      { "timestamp": "2026-06-09T12:00:02.000Z", "level": "error", "message": "Error: DATABASE_URL is missing" }
-    ],
-    "audit_written": true
-  }
-}
-```
-
-> Vercel's events API exposes build logs and recent runtime events. Older
-> runtime logs require a configured log drain and are not retrievable through
-> this API — the tool reports that as a `limitation`.
-
----
-
-## Policy & safety behavior
-
-The policy engine reasons about **capability × environment × provider × live-flag**,
-not individual tool names — so new tools inherit safe defaults automatically.
-
-Defaults:
-
-| Situation | Default |
-|---|---|
-| Any read | **allow** |
-| Dev/staging write (non-destructive) | **allow** |
-| Production write / deploy / env-var change | **approval_required** |
-| Live Stripe write | **approval_required** |
-| Destructive SQL (`DROP`/`TRUNCATE`/`DELETE`/`ALTER`…) | **block** (everywhere) |
-| Deleting resources | **block** (everywhere) |
-| Every provider action | **logged** to the audit trail |
-
-You override defaults with explicit rules (`set_policy_rule`) — higher priority
-wins. This is how you opt *into* something normally gated (e.g. "allow live
-Stripe writes for this reviewed project").
-
-When an action needs approval, the tool returns a structured response instead of
-executing:
-
-```json
-{
-  "status": "approval_required",
-  "policy_decision": "approval_required",
-  "executed": false,
-  "reason": "Production deploys require approval by default.",
-  "project": "your-project",
-  "environment": "production",
-  "provider": "vercel",
-  "action": "create_vercel_deployment",
-  "suggested_next_step": "Approve manually by adding an allow PolicyRule (set_policy_rule) ..."
-}
-```
-
-Every provider response carries explicit `policy_decision` (`allow` / `block` /
-`approval_required`) and `executed` (boolean) fields. Blocked actions return
-`"status": "blocked"`. Both blocked and approval-required responses set
-`executed: false` and are written to the audit log with `result: "not_executed"`
-— the provider API is never called.
-
-### Audit log
-
-Every attempt appends a JSON line to `.offlocal/audit.log` with: timestamp,
-project, environment, provider, tool, action summary, policy decision
-(allow/block/approval_required), result (success/error/not_executed), error
-message, and the provider resource used.
-
-### Project memory
-
-Agents read/write short notes per project/environment (`read_project_memory` /
-`write_project_memory`). Memory is also bundled into `get_project_context`, so a
-future agent session sees what happened before — e.g. *"Last Vercel deploy failed
-because DATABASE_URL was missing."*
-
----
-
-## CLI (optional)
-
-The MCP tools are the primary interface and most people never need the CLI — your
-agent does setup and inspection for you (Step 3 above). The `offlocal` CLI exists
-for scripting or seeding from a config file:
+The MCP tools are the primary interface. The CLI operates on the same `.offlocal/`
+state and is used for seeding and inspection:
 
 ```bash
-npx -p @offlocal/mcp offlocal init                # seed from .offlocal/config.yaml
+npx -p @offlocal/mcp offlocal init
 npx -p @offlocal/mcp offlocal project create "Acme CRM"
 npx -p @offlocal/mcp offlocal env add staging --kind staging
-npx -p @offlocal/mcp offlocal map railway staging --resource '{"projectId":"<id>"}'
+npx -p @offlocal/mcp offlocal map render staging --resource '{"serviceId":"srv-..."}'
 npx -p @offlocal/mcp offlocal context acme-crm --env staging
 ```
 
 Installed globally (`npm i -g @offlocal/mcp`), drop the `npx -p @offlocal/mcp`
-prefix and just run `offlocal ...`.
-
----
-
-## Develop from source
-
-Contributing or running an unreleased build:
-
-```bash
-git clone https://github.com/adi4x4/offlocalai-mcp && cd offlocalai-mcp
-npm install
-npm run build        # compiles to dist/
-npm test             # full test suite
-npm run typecheck
-```
-
-Then point your agent at the local build with `"command": "node", "args":
-["./dist/index.js"]` instead of the `npx` form above.
-
----
+prefix.
 
 ## Architecture
 
 ```
 src/
-  types.ts           domain types (Workspace/Project/Environment/Connection/Mapping/PolicyRule/Audit/Memory)
-  storage.ts         local-first JSON storage (.offlocal/)
-  policy.ts          capability-based policy engine (the safety core)
-  actions.ts         runGuarded() — the single choke point: policy + audit + execute
-  context.ts         get_project_context bundle
-  resolve.ts         project/environment/mapping resolution
-  sql.ts             SQL classification (defense-in-depth)
-  service.ts         business logic (used by both MCP tools and CLI)
+  types.ts             domain types
+  storage.ts           JSON storage under .offlocal/
+  deploy.ts            deploy orchestrator: trigger, poll, report
+  policy.ts            capability-based policy engine
+  actions.ts           runGuarded(): policy + audit + execute
+  context.ts           get_project_context
+  resolve.ts           project/environment/mapping resolution
   provider-actions.ts  guarded provider operations
-  providers/         isolated REST adapters: github, vercel, supabase, stripe
-  tools/index.ts     MCP tool registration
-  index.ts           stdio MCP server entry
-  cli.ts             offlocal CLI
+  providers/           REST/GraphQL adapters: github, vercel, railway, render, supabase, stripe
+  tools/index.ts       MCP tool registration
+  index.ts             stdio MCP server entry
+  cli.ts               offlocal CLI
 ```
 
-Provider adapters are isolated and stateless (token in, data out). Adding a
-provider = one adapter file + a few guarded actions + tool registrations.
+`deploy` triggers the deployment through `runGuarded`, so policy and audit apply,
+then polls the provider until the deployment reaches a terminal state. Provider
+adapters are stateless: token in, data out. Adding a provider is one adapter file
+plus guarded actions and tool registrations.
 
----
+Provider API details are in [docs/provider-research.md](docs/provider-research.md).
+
+## Development
+
+```bash
+git clone https://github.com/adi4x4/offlocalai-mcp && cd offlocalai-mcp
+npm install
+npm run build        # compiles to dist/
+npm test
+npm run typecheck
+```
+
+To run a local build, point the agent at `"command": "node", "args":
+["./dist/index.js"]`.
 
 ## Roadmap
 
-- **Approval flow** — replace the `approval_required` response with a real
-  approve/deny handshake (e.g. an `approve_action` tool + pending-action store).
-- **More provider surface** (Vercel git-backed deploys & file uploads, Supabase
-  migrations, Stripe subscriptions/invoices).
-- **More providers** (the adapter interface is the extension point).
-- **Optional SQLite backend** + cross-process locking if state grows.
-
-## Known V0 limitations / TODOs
-
-- No real approval handshake yet — approval is granted by adding a policy rule.
-- Vercel `create_deployment` supports redeploy-by-id / git-backed deploys; full
-  file-upload deploys are out of scope (documented in the research note).
-- Local SQL classification is defense-in-depth, **not** a security boundary —
-  Supabase's backend `read_only` flag is the real enforcement for reads. For
-  production, also use a **read-only database role / restricted credentials** so a
-  misclassified statement can't write even if it slips past the classifier.
-- No cross-process file locking on `.offlocal/state.json`.
-- Stripe live writes are gated but, once allowed, are not transactional/rollback-able.
+- A real approve/deny handshake to replace approval-by-policy-rule.
+- More deploy targets: Netlify, Cloudflare Pages/Workers, Fly.io.
+- Deploy from a diff, per-branch preview URLs, rollbacks.
+- Supabase migrations, Stripe subscriptions and invoices.
 
 ## License
 

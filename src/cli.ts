@@ -55,6 +55,7 @@ const REQUIRED_ENV_VARS = [
   ["STRIPE_TEST_SECRET_KEY", "Stripe sk_test_… key"],
   ["STRIPE_LIVE_SECRET_KEY", "Stripe sk_live_… key (only used when policy allows a live write)"],
   ["RAILWAY_TOKEN", "Railway account/workspace token"],
+  ["RENDER_API_KEY", "Render API key"],
 ];
 
 /** Print the MCP client config snippet + required env vars after init. */
@@ -85,6 +86,7 @@ function printSetupHelp(serverEntry: string): void {
               STRIPE_TEST_SECRET_KEY: "${STRIPE_TEST_SECRET_KEY}",
               STRIPE_LIVE_SECRET_KEY: "${STRIPE_LIVE_SECRET_KEY}",
               RAILWAY_TOKEN: "${RAILWAY_TOKEN}",
+              RENDER_API_KEY: "${RENDER_API_KEY}",
             },
           },
         },
@@ -123,7 +125,7 @@ Usage:
   offlocal map <provider> <environment> --resource '<json>' [--project <p>] [--connection <label>]
   offlocal context [project] [--env <e>] [--json]   Print the production-context summary
 
-Providers: github | vercel | supabase | stripe | railway
+Providers: github | vercel | supabase | stripe | railway | render
 
 Multiple accounts of one provider:
   offlocal connect vercel --label client-a --env-var VERCEL_TOKEN_CLIENT_A
@@ -135,6 +137,7 @@ Resource JSON examples:
   supabase: {"projectRef":"your_project_ref"}
   stripe:   {"mode":"live"}
   railway:  {"projectId":"your-railway-project-id","environmentId":"...","serviceId":"..."}
+  render:   {"serviceId":"srv-...","serviceName":"my-web-service"}
 `;
 
 async function main(): Promise<void> {

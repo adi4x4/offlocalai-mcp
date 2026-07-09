@@ -10,9 +10,9 @@
  * never persisted to disk (see ProviderConnection.auth).
  */
 
-export type ProviderId = "github" | "vercel" | "supabase" | "stripe" | "railway";
+export type ProviderId = "github" | "vercel" | "supabase" | "stripe" | "railway" | "render";
 
-export const PROVIDER_IDS: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway"];
+export const PROVIDER_IDS: ProviderId[] = ["github", "vercel", "supabase", "stripe", "railway", "render"];
 
 /** How "production-like" an environment is. Drives default policy. */
 export type EnvironmentKind = "development" | "staging" | "production";
@@ -121,12 +121,22 @@ export interface RailwayResource {
   projectName?: string;
 }
 
+export interface RenderResource {
+  /** Render service id, e.g. "srv-...". */
+  serviceId: string;
+  /** Friendly Render service name, for display only. */
+  serviceName?: string;
+  /** Render owner/workspace id (usr-/tea-...). Required for the logs API; auto-filled from the service if omitted. */
+  ownerId?: string;
+}
+
 export type ProviderResource =
   | ({ provider: "github" } & GithubResource)
   | ({ provider: "vercel" } & VercelResource)
   | ({ provider: "supabase" } & SupabaseResource)
   | ({ provider: "stripe" } & StripeResource)
-  | ({ provider: "railway" } & RailwayResource);
+  | ({ provider: "railway" } & RailwayResource)
+  | ({ provider: "render" } & RenderResource);
 
 export interface ProviderMapping {
   id: string;

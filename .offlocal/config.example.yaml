@@ -5,7 +5,7 @@
 # account/resource each environment uses → what policy permits. Secrets are
 # NEVER stored here; tokens are read from environment variables at call time
 # (GITHUB_TOKEN, VERCEL_TOKEN, VERCEL_TEAM_ID?, SUPABASE_ACCESS_TOKEN,
-# STRIPE_TEST_SECRET_KEY, STRIPE_LIVE_SECRET_KEY, RAILWAY_TOKEN).
+# STRIPE_TEST_SECRET_KEY, STRIPE_LIVE_SECRET_KEY, RAILWAY_TOKEN, RENDER_API_KEY).
 
 projects:
   # The key is your project's id-safe slug. Add one block per project.
@@ -18,6 +18,10 @@ projects:
           repo: your-org/your-repo
         vercel:
           project: your-staging-vercel-project   # id or name
+        # Or deploy staging to Render instead of / alongside Vercel:
+        # render:
+        #   service_id: srv-your-staging-service
+        #   service_name: your-web-service        # display only
         supabase:
           project_ref: your_staging_project_ref
         stripe:
@@ -61,6 +65,8 @@ policy:
     - vercel.env.write
     - railway.deploy
     - railway.env.write
+    - render.deploy
+    - render.env.write
     - supabase.write
     - stripe.write
   block:

@@ -106,6 +106,28 @@ export async function listDeployments(
   }));
 }
 
+/** Fetch a single deployment by id — used to poll a deploy's status/URL. */
+export async function getDeployment(
+  token: string,
+  deploymentId: string,
+): Promise<RailwayDeployment | null> {
+  const query = `query deployment($id: String!) {
+    deployment(id: $id) { id status url staticUrl createdAt }
+  }`;
+  const data = await gql<{ deployment: Record<string, any> | null }>(token, query, {
+    id: deploymentId,
+  });
+  const d = data.deployment;
+  if (!d) return null;
+  return {
+    id: d.id,
+    status: d.status,
+    url: d.url ?? undefined,
+    staticUrl: d.staticUrl ?? undefined,
+    createdAt: d.createdAt ?? undefined,
+  };
+}
+
 export interface RailwayLog {
   timestamp?: string;
   message?: string;

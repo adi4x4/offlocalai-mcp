@@ -39,6 +39,8 @@ export function defaultEnvVar(provider: string): string {
       return "STRIPE_TEST_SECRET_KEY";
     case "railway":
       return "RAILWAY_TOKEN";
+    case "render":
+      return "RENDER_API_KEY";
     default:
       return `${provider.toUpperCase()}_TOKEN`;
   }
